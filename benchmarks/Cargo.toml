@@ -1,0 +1,20 @@
+[package]
+name = "oos-lite-benchmarks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+oos-lite-core = { path = "../core" }
+criterion = { workspace = true }
+blake3 = { workspace = true }
+crc32fast = { workspace = true }
+tempfile = "3.8"
+
+[[bin]]
+name = "bench_runner"
+path = "src/main.rs"
+
+[[bench]]
+name = "suites"
+harness = false

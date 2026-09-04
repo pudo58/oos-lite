@@ -1,0 +1,17 @@
+﻿[package]
+name = "oos-lite-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+blake3 = { workspace = true }
+crc32fast = { workspace = true }
+fastcdc = { workspace = true }
+sled = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.8"
+tracing-subscriber = { workspace = true }
