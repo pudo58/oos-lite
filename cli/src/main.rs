@@ -59,6 +59,8 @@ enum Commands {
     Fsck,
     #[command(about = "Launch embedded Web UI Dashboard")]
     Ui {
+        #[arg(long, help = "Host address to listen on", default_value = "127.0.0.1")]
+        host: String,
         #[arg(short, long, help = "Port to listen on", default_value_t = 3000)]
         port: u16,
         #[arg(long, help = "Do not automatically open browser")]
@@ -242,8 +244,8 @@ fn main() -> anyhow::Result<()> {
             }
             println!("============================================================");
         }
-        Commands::Ui { port, no_open } => {
-            ui::start_ui_server(engine, port, no_open)?;
+        Commands::Ui { host, port, no_open } => {
+            ui::start_ui_server(engine, &host, port, no_open)?;
         }
     }
 

@@ -60,6 +60,38 @@ impl SegmentStore {
         segments_dir: &Path,
         index: &SegmentIndex,
     ) -> Result<(u64, u64)> {
+        // Cleanup leftover staging or restore from .old in case of crash during compaction
+        let mut has_seg_files = false;
+        let mut old_seg_files = Vec::new();
+
+        if let Ok(entries) = fs::read_dir(segments_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with(".compact_tmp_") {
+                    let _ = fs::remove_dir_all(&path);
+                } else if name_str.starts_with("segment_") && name_str.ends_with(".seg") {
+                    has_seg_files = true;
+                } else if name_str.starts_with("segment_") && name_str.ends_with(".seg.old") {
+                    old_seg_files.push(path);
+                }
+            }
+        }
+
+        if has_seg_files {
+            for old_path in old_seg_files {
+                let _ = fs::remove_file(old_path);
+            }
+        } else {
+            // No .seg files found, restore previous .old files if present
+            for old_path in old_seg_files {
+                let path_str = old_path.to_string_lossy();
+                let new_path_str = &path_str[..path_str.len() - 4]; // strip ".old"
+                let _ = fs::rename(&old_path, new_path_str);
+            }
+        }
+
         let mut segment_ids = Vec::new();
 
         for entry in fs::read_dir(segments_dir)? {
@@ -234,42 +266,21 @@ impl SegmentStore {
 
         let total_before = self.index.len();
 
-        // 1. Collect all chunks that must be preserved
-        let mut chunks_to_keep: Vec<(ChunkId, Vec<u8>)> = Vec::new();
-        for (id, loc) in self.index.entries() {
-            if reachable.contains(&id) {
-                let data = self.reader.read_chunk(&id, &loc)?;
-                chunks_to_keep.push((id, data));
+        // 1. Quick check: if all chunks are reachable, nothing to reclaim
+        let mut has_dead_chunks = false;
+        for (id, _) in self.index.entries() {
+            if !reachable.contains(&id) {
+                has_dead_chunks = true;
+                break;
             }
         }
-
-        let dead_count = total_before.saturating_sub(chunks_to_keep.len());
-        if dead_count == 0 {
+        if !has_dead_chunks {
             return Ok(0);
         }
 
         let max_seg_size = writer_guard.max_segment_size();
 
-        // 2. Release current segment file handle in writer
-        writer_guard.close_file()?;
-
-        // 3. If zero chunks left to keep, clear all segment files and reinitialize
-        if chunks_to_keep.is_empty() {
-            for entry in fs::read_dir(&self.segments_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with("segment_") && name.ends_with(".seg") {
-                        let _ = fs::remove_file(&path);
-                    }
-                }
-            }
-            self.index.clear();
-            *writer_guard = SegmentWriter::open(&self.segments_dir, 1, 0, max_seg_size)?;
-            return Ok(dead_count);
-        }
-
-        // 4. Write all retained chunks into temporary directory
+        // 2. Prepare temporary staging directory
         let tmp_compact_dir = self.segments_dir.join(format!(".compact_tmp_{}", std::process::id()));
         if tmp_compact_dir.exists() {
             let _ = fs::remove_dir_all(&tmp_compact_dir);
@@ -278,41 +289,76 @@ impl SegmentStore {
 
         let new_index = SegmentIndex::new();
         let mut new_writer = SegmentWriter::open(&tmp_compact_dir, 1, 0, max_seg_size)?;
-        for (id, data) in &chunks_to_keep {
-            new_writer.append_chunk(*id, data, &new_index)?;
+
+        // 3. Stream retained chunks ONE-BY-ONE (Zero-OOM streaming)
+        for (id, loc) in self.index.entries() {
+            if reachable.contains(&id) {
+                let data = self.reader.read_chunk(&id, &loc)?;
+                new_writer.append_chunk(id, &data, &new_index)?;
+            }
         }
+
+        let retained_count = new_index.len();
+        let dead_count = total_before.saturating_sub(retained_count);
+
         new_writer.sync()?;
         let latest_seg_id = new_writer.current_segment_id();
         let resume_offset = new_writer.current_offset();
         new_writer.close_file()?;
 
-        // 5. Delete old segment files from segments_dir
+        // 4. Release current writer and clear reader cache before file swap
+        writer_guard.close_file()?;
+        self.reader.clear_cache();
+
+        // 5. Two-Phase Safe Swap:
+        // Phase 5a: Rename all active segment_*.seg to segment_*.seg.old
+        let mut old_files = Vec::new();
         for entry in fs::read_dir(&self.segments_dir)? {
             let entry = entry?;
             let path = entry.path();
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 if name.starts_with("segment_") && name.ends_with(".seg") {
-                    let _ = fs::remove_file(&path);
+                    let old_path = self.segments_dir.join(format!("{}.old", name));
+                    fs::rename(&path, &old_path)?;
+                    old_files.push(old_path);
                 }
             }
         }
 
-        // 6. Move newly compacted segment files into segments_dir
-        for entry in fs::read_dir(&tmp_compact_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with("segment_") && name.ends_with(".seg") {
-                    let dest = self.segments_dir.join(name);
-                    fs::rename(&path, &dest)?;
+        // Phase 5b: Finalize segment files
+        if retained_count > 0 {
+            for entry in fs::read_dir(&tmp_compact_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with("segment_") && name.ends_with(".seg") {
+                        let dest = self.segments_dir.join(name);
+                        fs::rename(&path, &dest)?;
+                    }
                 }
             }
-        }
-        let _ = fs::remove_dir_all(&tmp_compact_dir);
+            let _ = fs::remove_dir_all(&tmp_compact_dir);
 
-        // 7. Update memory index and re-attach writer
-        self.index.replace_with(new_index);
-        *writer_guard = SegmentWriter::open(&self.segments_dir, latest_seg_id, resume_offset, max_seg_size)?;
+            // Phase 5c: New segments are safely in place, now delete backup .old files
+            for old_path in old_files {
+                let _ = fs::remove_file(old_path);
+            }
+
+            // 6. Update in-memory index and re-attach writer
+            self.index.replace_with(new_index);
+            *writer_guard = SegmentWriter::open(&self.segments_dir, latest_seg_id, resume_offset, max_seg_size)?;
+        } else {
+            let _ = fs::remove_dir_all(&tmp_compact_dir);
+
+            // Phase 5c: Delete all old files
+            for old_path in old_files {
+                let _ = fs::remove_file(old_path);
+            }
+
+            // 6. When zero chunks are kept, re-initialize fresh segment_00000001.seg with resume_offset 0
+            self.index.replace_with(new_index);
+            *writer_guard = SegmentWriter::open(&self.segments_dir, 1, 0, max_seg_size)?;
+        }
 
         Ok(dead_count)
     }

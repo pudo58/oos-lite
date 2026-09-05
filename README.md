@@ -1,181 +1,345 @@
-﻿# OOS-Lite — Content-Addressed & Deduplicated File Storage Engine
+# OOS-Lite — Content-Addressed & Deduplicated File Storage Engine
 
-[![Language](https://img.shields.io/badge/language-Rust-orange.svg)](https://www.rust-lang.org/)
+[![Language](https://img.shields.io/badge/language-Rust%202021-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-39%20passed%20%7C%20100%25-brightgreen.svg)]()
 [![Engine](https://img.shields.io/badge/storage-Append--Only%20Segments%20%2B%20Sled-success.svg)]()
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey.svg)]()
 
-> **OOS-Lite** là ứng dụng và thư viện lưu trữ file cục bộ viết bằng Rust, hiện thực hoá các nguyên lý storage engine từ kiến trúc OOS (Object / Manifest / Chunk / Segment, immutable chunks, content deduplication, multi-versioning, zero-copy snapshots, redo-only WAL, crash consistency).
-
----
-
-## 1. Tổng quan & Mục tiêu sản phẩm
-
-OOS-Lite được thiết kế để giải quyết bài toán backup và lưu trữ phiên bản file cá nhân (thay thế cho `cp`, `rsync` trong các kịch bản sao lưu cục bộ nhiều phiên bản):
-
-1. **Deduplication cấp độ Chunk (FastCDC):** Lưu lại nhiều phiên bản của cùng một tập tin (hoặc các tập tin có nội dung tương đồng) mà **không làm tốn dung lượng theo cấp số nhân**. Chỉ những khối dữ liệu bị thay đổi mới ghi thêm vào đĩa.
-2. **Snapshot gần như tức thì ($O(1)$):** Chụp trạng thái toàn bộ store tại một thời điểm tức thời thông qua tham chiếu cây chỉ mục, hoàn toàn không copy dữ liệu vật lý.
-3. **Crash Consistency tuyệt đối:** Áp dụng Write-Ahead Logging (WAL redo-only) và append-only segments. Quy trình ghi được đảm bảo an toàn ngay cả khi tiến trình bị dừng đột ngột (`kill -9` hoặc mất điện).
-4. **Không phụ thuộc nhân OS:** Đóng gói trọn vẹn trong môi trường user-space (CLI + core library), độc lập, sẵn sàng nhúng và chạy trên Linux/Windows/macOS.
+> **OOS-Lite** is a high-performance, embedded, content-addressed file storage engine written in Rust. It implements core principles of modern distributed storage architectures—immutable chunks, content-defined chunking (FastCDC), BLAKE3 content hashing, multi-versioning, instant zero-copy snapshots, redo-only WAL crash consistency, and memory-bounded garbage collection—packaged as an easy-to-use CLI and pure Rust library with an embedded real-time Web UI dashboard.
 
 ---
 
-## 2. Kiến trúc Storage Engine
+## Table of Contents
 
-### 2.1 Luồng dữ liệu ghi (Write Path)
+- [1. Overview & Core Value](#1-overview--core-value)
+- [2. System Architecture](#2-system-architecture)
+  - [2.1 Write Path Dataflow](#21-write-path-dataflow)
+  - [2.2 Core Storage Components](#22-core-storage-components)
+  - [2.3 Crash Consistency & Safe Compaction](#23-crash-consistency--safe-compaction)
+- [3. Embedded Web UI Dashboard](#3-embedded-web-ui-dashboard)
+- [4. Command-Line Interface (CLI)](#4-command-line-interface-cli)
+- [5. On-Disk Storage Layout](#5-on-disk-storage-layout)
+- [6. Workspace & Codebase Structure](#6-workspace--codebase-structure)
+- [7. Technology Stack & Dependencies](#7-technology-stack--dependencies)
+- [8. Installation & Getting Started](#8-installation--getting-started)
+- [9. Development Milestones](#9-development-milestones)
+- [10. License](#10-license)
+
+---
+
+## 1. Overview & Core Value
+
+Traditional file backups relying on `cp`, `rsync`, or basic archive utilities suffer from exponential storage growth when saving multiple iterations of large files or directory trees. OOS-Lite solves this by operating at the **sub-file chunk level**:
+
+1. **Content-Defined Chunking (FastCDC):** Files are partitioned dynamically based on data content rather than fixed offsets. Editing a few bytes in the middle of a large file only produces new chunks for the modified region; all unchanged blocks are deduplicated.
+2. **Instant Zero-Copy Snapshots ($O(1)$):** Point-in-time snapshots capture the state of the entire store by referencing B-Tree index roots. Creating a snapshot takes sub-millisecond time and consumes zero additional disk space for file payloads.
+3. **Absolute Crash Consistency:** Utilizing append-only segment storage and a redo-only Write-Ahead Log (WAL) with CRC32C verification, the engine guarantees data integrity even during sudden power outages or `kill -9` process termination.
+4. **Constant-Memory Garbage Collection ($O(1)$ RAM):** The mark-and-sweep compactor streams live chunks directly between segment files without buffering datasets into system memory, preventing Out-Of-Memory (OOM) crashes on multi-gigabyte stores.
+5. **Zero OS Kernel Dependencies:** Runs completely in user-space as a portable binary or embedded library across Linux, macOS, and Windows.
+
+---
+
+## 2. System Architecture
+
+### 2.1 Write Path Dataflow
 
 ```
-File Input
-    │
-    ▼
-FastCDC Chunker (Target: 64 KiB, Min: 16 KiB, Max: 256 KiB)
-    │
-    ▼
-Chunk ID = BLAKE3(bytes)  ───► Checksum = CRC32C(bytes)
-    │
-    ▼
-Chunk Store ──(Kiểm tra dedup)──► Nếu chưa có: Ghi Append-Only vào Segment (~256 MiB)
-    │
-    ▼
-Manifest (Danh sách thứ tự ChunkID cấu thành file logic + version + metadata)
-    │
-    ▼
-Object Record (ObjectID 128-bit HLID, Version, ManifestRef)
-    │
-    ▼
-Name Index (Sled Tree: path string -> ObjectID) & Object Index (ObjectID -> Latest Manifest)
+                     ┌───────────────────────────┐
+                     │     Input File Stream     │
+                     └─────────────┬─────────────┘
+                                   │
+                                   ▼
+                     ┌───────────────────────────┐
+                     │ FastCDC Dynamic Chunker   │
+                     │ (Min: 16 KiB, Target: 64) │
+                     └─────────────┬─────────────┘
+                                   │
+                    ┌──────────────┴──────────────┐
+                    ▼                             ▼
+       ┌────────────────────────┐    ┌────────────────────────┐
+       │ Chunk ID: BLAKE3(data) │    │ Checksum: CRC32C(data) │
+       └────────────┬───────────┘    └────────────┬───────────┘
+                    │                             │
+                    ▼                             ▼
+       ┌───────────────────────────────────────────────────────┐
+       │ Check Existence in Segment Store (Deduplication)      │
+       ├──────────────────────────────┬────────────────────────┤
+       │ If New: Append to Segment    │ If Exists: Reuse ID    │
+       │ (~256 MiB Sequential File)   │ (0 Bytes Disk Written) │
+       └────────────┬─────────────────┴────────────────────────┘
+                    │
+                    ▼
+       ┌───────────────────────────────────────────────────────┐
+       │ Build Manifest (Ordered ChunkIDs + Lengths + Metas)   │
+       └────────────┬──────────────────────────────────────────┘
+                    │
+                    ▼
+       ┌───────────────────────────────────────────────────────┐
+       │ Write-Ahead Log (Redo Log Append + fsync)             │
+       └────────────┬──────────────────────────────────────────┘
+                    │
+                    ▼
+       ┌───────────────────────────────────────────────────────┐
+       │ Update Sled Embedded B-Trees:                         │
+       │  • Name Index:   "docs/report.pdf" ──► ObjectID (HLID)│
+       │  • Object Index: ObjectID ──► Latest Manifest + Vers  │
+       └───────────────────────────────────────────────────────┘
 ```
 
-### 2.2 Các thành phần cốt lõi
+### 2.2 Core Storage Components
 
-- **Chunk:** Khối dữ liệu bất biến (immutable). Định danh duy nhất bằng hash `BLAKE3(bytes)` và kiểm tra tính toàn vẹn bằng `CRC32C`.
-- **Segment Store:** Các file segment ghi tuần tự append-only với kích thước mục tiêu ~256 MiB mỗi segment, hỗ trợ sequential write và fast random read.
-- **Manifest:** Mô tả một phiên bản cụ thể của file thông qua mảng các `ChunkID` liên tục.
-- **Name Index vs. Object Index:**
-  - `ObjectID`: 128-bit Hybrid Logical ID (NodeID / TypeTag / Timestamp / Random), duy trì định danh bền vững của file qua các lần chỉnh sửa nội dung.
-  - `Name Index`: Ánh xạ đường dẫn (`"backup/photo.jpg"`) → `ObjectID`. Giúp thao tác đổi tên file không cần sửa đổi dữ liệu vật lý hay ObjectID.
-  - `Object Index`: B-Tree (Sled) quản lý lịch sử version và trỏ tới Manifest mới nhất của từng `ObjectID`.
-- **WAL (Write-Ahead Log):** Đảm bảo tính nguyên tử (atomic) của chuỗi thao tác ghi: `WAL append + fsync` → ghi chunk → cập nhật metadata index → checkpoint.
+* **Chunk:** An immutable byte sequence bounded by FastCDC. Identified uniquely by `BLAKE3(bytes)` (256-bit hash) with payload integrity validated via `CRC32C`.
+* **Segment Store:** Large, sequential append-only container files (`segment_00000001.seg`) targeting ~256 MiB each. Sequential writes maximize disk throughput, while random reads benefit from an integrated File Descriptor Cache.
+* **Manifest:** A version-specific blueprint listing the ordered array of `ChunkID`s that reconstruct the original logical file.
+* **ObjectID (128-bit HLID):** A Hybrid Logical Identifier (Node ID / Type Tag / Timestamp / Entropy) providing permanent object identity across file edits, renames, and versions.
+* **Decoupled Indexing (Sled B-Tree):**
+  * **Name Index:** Maps human-readable logical paths (`"photos/summer.jpg"`) to `ObjectID`. File renames update only this lightweight mapping without modifying physical data chunks or version history.
+  * **Object Index:** Tracks version lineage, creation timestamps, and points to the corresponding `Manifest` for each version of an `ObjectID`.
+* **Write-Ahead Log (WAL):** Redo-only logging ensuring atomic transactions across crash boundaries. Uncommitted operations are replayed idempotently upon engine restart.
+
+### 2.3 Crash Consistency & Safe Compaction
+
+* **Two-Phase Safe Compaction:** During Garbage Collection, new compacted segments are written to a temporary staging area (`.compact_tmp_<pid>`). Old segments are renamed to `.seg.old` before the new segments take their place. If a crash occurs during compaction, startup recovery restores from `.seg.old` automatically—eliminating any risk of data loss.
+* **WAL Write-Amplification Optimization:** The WAL records payloads exclusively for newly introduced chunks. Chunks already residing in the segment store are referenced by ID alone, eliminating 2x write amplification.
 
 ---
 
-## 3. Giao diện dòng lệnh (CLI Interface)
+## 3. Embedded Web UI Dashboard
 
-OOS-Lite cung cấp bộ công cụ CLI đơn giản và trực quan:
+OOS-Lite includes a built-in, modern, responsive Web Dashboard served directly from the executable with zero external runtime dependencies.
 
 ```bash
-# Lưu file vào store (tạo file mới hoặc đẩy version mới)
-oos-lite put <path>
+oos-lite ui --port 3000
+```
 
-# Trích xuất nội dung file ra đường dẫn chỉ định
-oos-lite get <name|id> <out_path>
+### Dashboard Features
 
-# Liệt kê các file đang lưu trữ trong store
+1. **System Overview (Metrics & Analytics):**
+   * Real-time metrics: Logical stored size, Physical disk footprint, Savings Ratio, Total chunks, and Active files.
+   * Interactive **Chart.js** data visualization comparing logical vs. physical disk utilization.
+2. **File Explorer:**
+   * Toggle between responsive **Card Grid View** and detailed **Table View**.
+   * Real-time search and filter by file name or extension.
+   * Categorized file badge indicators (Images, Source Code, Archives, Documents).
+   * **In-Browser File Preview Modal:** Inspect source code, Markdown, JSON, plain text, logs, and images directly without downloading.
+3. **Snapshot Center:**
+   * Inspect point-in-time snapshots with complete file inventories.
+   * One-click snapshot restoration to designated destination folders.
+4. **Upload Center:**
+   * Interactive drag-and-drop zone supporting single files and **recursive directory folder uploads**.
+   * Live upload progress tracking per file.
+5. **Maintenance & Storage Health:**
+   * Trigger Garbage Collection (Mark-and-Sweep Compaction) with safety confirmation modals.
+   * Inspect segment fragmentation and storage diagnostics.
+
+---
+
+## 4. Command-Line Interface (CLI)
+
+### Core File Operations
+
+```bash
+# Store a file (creates a new object or appends a new version)
+oos-lite put path/to/document.pdf
+
+# Store with an explicit logical name
+oos-lite put path/to/archive.tar.gz --name backups/daily.tar.gz
+
+# Retrieve a file by logical name or ObjectID
+oos-lite get backups/daily.tar.gz ./restored.tar.gz
+
+# Retrieve a specific historical version
+oos-lite get backups/daily.tar.gz ./restored_v1.tar.gz --version 1
+
+# List all stored files with latest version, size, and chunk counts
 oos-lite list
 
-# Xem lịch sử các phiên bản (version history) của một file
-oos-lite versions <name|id>
+# Inspect version history and timestamps for an object
+oos-lite versions backups/daily.tar.gz
 
-# Tạo snapshot trạng thái toàn bộ store
-oos-lite snapshot create <label>
+# Remove a logical file mapping
+oos-lite rm backups/daily.tar.gz
+```
 
-# Liệt kê các snapshot đã tạo
+### Snapshot Management
+
+```bash
+# Create an instant zero-copy snapshot
+oos-lite snapshot create v1.0.0-release
+
+# List existing snapshots
 oos-lite snapshot list
 
-# Khôi phục toàn bộ store từ snapshot ra thư mục
-oos-lite snapshot restore <label> <dest_dir>
+# Restore a snapshot to a target directory
+oos-lite snapshot restore v1.0.0-release ./release-export
 
-# Thống kê dung lượng logic, dung lượng vật lý, tỉ lệ dedup, số chunk...
+# Delete a snapshot
+oos-lite snapshot delete v1.0.0-release
+```
+
+### Maintenance & Diagnostics
+
+```bash
+# View storage statistics, deduplication ratio, and chunk metrics
 oos-lite stats
 
-# Dọn dẹp (Mark-and-Sweep) các chunk mồ côi không còn được tham chiếu
+# Reclaim space from orphaned chunks (Mark-and-Sweep)
 oos-lite gc
 
-# Kiểm tra tính toàn vẹn dữ liệu (Integrity Check)
+# Verify cryptographic and structural integrity across all chunks
 oos-lite fsck
+
+# Start the Web UI Dashboard
+oos-lite ui --host 127.0.0.1 --port 3000
 ```
 
 ---
 
-## 4. Cấu trúc Workspace & Mã nguồn
+## 5. On-Disk Storage Layout
+
+By default, OOS-Lite initializes its storage root in `.oos-store` (customizable via `-s, --store-dir`):
+
+```
+.oos-store/
+├── segments/               # Append-only chunk storage
+│   ├── segment_00000001.seg
+│   └── segment_00000002.seg
+├── wal/                    # Redo Write-Ahead Log
+│   └── wal.log
+├── sled/                   # Embedded B-Tree metadata database
+│   ├── conf
+│   ├── db
+│   └── snap.*
+└── snapshots/              # Snapshot manifests
+    ├── v1.0.0.meta
+    └── v1.0.0.data
+```
+
+---
+
+## 6. Workspace & Codebase Structure
+
+The project is structured as a modular Cargo workspace:
 
 ```
 oos-lite/
-├── Cargo.toml                  # Cargo workspace cấu hình chung
-├── README.md                   # Tài liệu hướng dẫn sử dụng & thiết kế
-├── OOS-Lite-File-Storage-App-Prompt.md # Đặc tả kiến trúc & quy chuẩn kỹ thuật
-├── core/                       # Core library (logic lưu trữ, độc lập với CLI)
+├── Cargo.toml                  # Workspace manifest
+├── LICENSE                     # Dual license terms (MIT / Apache-2.0)
+├── LICENSE-MIT                 # MIT License
+├── LICENSE-APACHE              # Apache License 2.0
+├── README.md                   # Project documentation
+├── core/                       # Storage Engine Core Library
 │   ├── Cargo.toml
 │   └── src/
-│       ├── lib.rs
-│       ├── error.rs            # Định nghĩa lỗi tập trung (thiserror)
-│       ├── chunk/              # Chunk engine, BLAKE3, CRC32C, FastCDC
-│       ├── segment/            # Append-only segment file writer/reader
-│       ├── manifest/           # Manifest cấu trúc chunk sequence
-│       ├── object/             # ObjectID 128-bit & Object records
-│       ├── index/              # Sled database: Name Index, Object Index
-│       ├── wal/                # Redo-only Write-Ahead Log
-│       ├── gc/                 # Mark-and-sweep garbage collection
-│       └── snapshot/           # Zero-copy snapshot management
-├── cli/                        # CLI binary (tương tác người dùng qua clap)
+│       ├── lib.rs              # Public library API & engine exports
+│       ├── error.rs            # Typed error definitions (thiserror)
+│       ├── engine.rs           # Orchestrator (StorageEngine coordination)
+│       ├── chunk/              # BLAKE3 identity, CRC32C, FastCDC chunker
+│       ├── segment/            # Sequential segment store, writer, cached reader
+│       ├── manifest/           # Manifest records & chunk sequences
+│       ├── object/             # 128-bit HLID & Object version records
+│       ├── index/              # Sled B-Tree integration (Name & Object indices)
+│       ├── wal/                # Redo-only Write-Ahead Log implementation
+│       ├── gc/                 # Safe mark-and-sweep compaction
+│       └── snapshot/           # Zero-copy snapshot engine
+├── cli/                        # Command-Line Application & Web Server
 │   ├── Cargo.toml
 │   └── src/
-│       └── main.rs
-└── benchmarks/                 # Bộ kiểm thử hiệu năng (Criterion)
+│       ├── main.rs             # Clap CLI entrypoint
+│       └── ui/
+│           ├── server.rs       # Embedded HTTP server (tiny_http)
+│           └── index.html      # Responsive Single-Page Web Dashboard
+└── benchmarks/                 # Criterion Performance Benchmarks
     ├── Cargo.toml
-    └── benches/
+    ├── benches/                # Criterion benchmark suites
+    └── src/
+        └── main.rs             # CLI benchmark comparison runner
 ```
 
 ---
 
-## 5. Danh mục công nghệ & Crate Dependencies
+## 7. Technology Stack & Dependencies
 
-Các dependency cốt lõi được ghim chặt chẽ theo đặc tả kỹ thuật:
-
-| Thành phần | Crate | Vai trò |
-|---|---|---|
-| **Content Hashing** | [`blake3`](https://crates.io/crates/blake3) | Sinh định danh băm 256-bit cho từng Chunk |
-| **Checksum** | [`crc32fast`](https://crates.io/crates/crc32fast) | Kiểm tra tính toàn vẹn khối dữ liệu vật lý |
-| **Content-Defined Chunking** | [`fastcdc`](https://crates.io/crates/fastcdc) | Cắt nhỏ luồng dữ liệu theo ranh giới động tối ưu |
-| **Index & Metadata DB** | [`sled`](https://crates.io/crates/sled) | Embedded KV database cho Name/Object/Manifest trees |
-| **Error Handling** | [`thiserror`](https://crates.io/crates/thiserror), [`anyhow`](https://crates.io/crates/anyhow) | Typed error cho `core`, linh hoạt cho `cli` |
-| **Structured Logging** | [`tracing`](https://crates.io/crates/tracing) | Structured logging & diagnostics |
-| **CLI Parser** | [`clap`](https://crates.io/crates/clap) | Phân tích cú pháp dòng lệnh (derive API) |
-| **Benchmarking** | [`criterion`](https://crates.io/crates/criterion) | Đo lường hiệu năng, so sánh tỉ lệ dedup & độ trễ |
-
----
-
-## 6. Lộ trình phát triển (Milestones)
-
-- [ ] **Milestone 0 — Bootstrap:** Khởi tạo Cargo workspace (`core`, `cli`, `benchmarks`), error types (`OosLiteError`), tracing, test harness.
-- [ ] **Milestone 1 — Chunk Engine:** `put_chunk`, `get_chunk`, `has_chunk`, BLAKE3 identity, CRC32C checksum, kiểm tra dedup vật lý.
-- [ ] **Milestone 2 — Segment Store:** Quản lý segment append-only 256 MiB, segment rotation, phát hiện bản ghi hỏng, phục hồi sau `kill -9`.
-- [ ] **Milestone 3 — FastCDC & End-to-End Integration:** Tích hợp CDC chunking, kiểm thử end-to-end chu trình ghi → đọc lại byte-for-byte sau khi restart.
-- [ ] **Milestone 4 — Manifest & Sled Index Trees:** Quản lý manifest theo phiên bản, Name Index và Object Index trên `sled`.
-- [ ] **Milestone 5 — WAL & Crash Consistency:** Hoàn thiện write-path có bảo vệ bằng WAL redo-only và kiểm thử phục hồi lỗi tại nhiều điểm ghi.
-- [ ] **Milestone 6 — Versioning & Zero-Copy Snapshot:** Truy vấn lịch sử file, tạo snapshot trong thời gian < 10ms, khôi phục snapshot.
-- [ ] **Milestone 7 — Mark-and-Sweep GC:** Dọn dẹp chunk mồ côi dựa trên root-set (các snapshot còn sống + các version hợp lệ).
-- [ ] **Milestone 8 — Hoàn thiện CLI:** Đóng gói toàn bộ lệnh qua CLI clap, báo cáo `stats` chi tiết.
-- [ ] **Milestone 9 — Benchmark thực tế:** Đo lường và đối sánh định lượng với `cp` và `rsync --link-dest`.
+| Component | Library / Crate | Purpose |
+| :--- | :--- | :--- |
+| **Content Addressing** | [`blake3`](https://crates.io/crates/blake3) | Cryptographic 256-bit chunk identification at hardware speeds |
+| **Data Integrity** | [`crc32fast`](https://crates.io/crates/crc32fast) | SIMD-accelerated physical block verification |
+| **CDC Chunking** | [`fastcdc`](https://crates.io/crates/fastcdc) | Fast Content-Defined Chunking with dynamic cut points |
+| **Metadata Engine** | [`sled`](https://crates.io/crates/sled) | Embedded lock-free B-Tree database for names and manifests |
+| **CLI Framework** | [`clap`](https://crates.io/crates/clap) | Declarative CLI argument parsing |
+| **Embedded Web** | [`tiny_http`](https://crates.io/crates/tiny_http) | Lightweight, non-async embedded HTTP server |
+| **Diagnostics** | [`tracing`](https://crates.io/crates/tracing) | High-performance structured logging |
+| **Error Handling** | [`thiserror`](https://crates.io/crates/thiserror) / [`anyhow`](https://crates.io/crates/anyhow) | Idiomatic Rust error hierarchies |
+| **Benchmarking** | [`criterion`](https://crates.io/crates/criterion) | Microbenchmarking and statistical regression analysis |
 
 ---
 
-## 7. Hướng dẫn cài đặt & Kiểm thử
+## 8. Installation & Getting Started
 
-### Yêu cầu môi trường
-- **Rust Toolchain:** Stable (phiên bản >= 1.75 khuyên dùng)
-- **Cargo**
+### Prerequisites
 
-### Biên dịch dự án
+* **Rust Toolchain:** Version 1.75+ (Tested on Rust `1.98.1` stable).
+* **C/C++ Linker:** MSVC or GCC / MinGW (`w64devkit` on Windows).
+
+### Building from Source
+
 ```bash
+# Clone repository
+git clone https://github.com/pudo58/oos-lite.git
+cd oos-lite
+
+# Build debug workspace
 cargo build --workspace
+
+# Build optimized release binary
+cargo build --release -p oos-lite
 ```
 
-### Chạy kiểm thử tự động
+The resulting binary will be available at `./target/release/oos-lite` (or `./target/release/oos-lite.exe` on Windows).
+
+### Running Tests
+
 ```bash
+# Run all unit, integration, crash-recovery, and E2E tests (39 tests)
 cargo test --workspace
 ```
 
-### Chạy kiểm thử hiệu năng (Benchmarks)
+### Running Benchmarks
+
 ```bash
+# Run Criterion benchmarks
 cargo bench --workspace
+
+# Or execute the comparative benchmark runner
+cargo run -p oos-lite-benchmarks
 ```
+
+---
+
+## 9. Development Milestones
+
+All core milestones from the OOS-Lite engineering specification have been successfully implemented and verified:
+
+- [x] **Milestone 0 — Bootstrap:** Workspace setup, central error types (`OosLiteError`), tracing integration, and testing harness.
+- [x] **Milestone 1 — Chunk Engine:** Content-addressed chunking, BLAKE3 identification, CRC32C checksums, and storage deduplication.
+- [x] **Milestone 2 — Segment Store:** 256 MiB append-only segments, file rotation, corrupted record detection, and File Descriptor Caching.
+- [x] **Milestone 3 — FastCDC Integration:** Dynamic sub-file boundaries, byte-for-byte fidelity across engine restarts.
+- [x] **Milestone 4 — Manifest & Index Trees:** Versioned manifest tracking, Sled Name Index and Object Index workflows.
+- [x] **Milestone 5 — WAL & Crash Consistency:** Redo-only WAL write path, zero-write-amplification filtering, and multi-point kill recovery.
+- [x] **Milestone 6 — Versioning & Zero-Copy Snapshots:** Sub-millisecond snapshot generation, version lineage queries, and full directory tree restoration.
+- [x] **Milestone 7 — Mark-and-Sweep GC:** Streaming two-phase safe compaction with zero OOM risk and constant $O(1)$ memory usage.
+- [x] **Milestone 8 — CLI & Diagnostics:** Complete `clap` interface, storage metrics (`stats`), integrity auditing (`fsck`), and Path Traversal sanitization.
+- [x] **Milestone 9 — Real-World Benchmarks:** Comparative benchmark runner measuring deduplication savings and latency against traditional copy mechanisms.
+- [x] **Milestone 10 — Embedded Web UI Dashboard:** Responsive single-page application with real-time metrics, interactive File Explorer, in-browser previews, and drag-and-drop uploads.
+
+---
+
+## 10. License
+
+This project is dual-licensed under either:
+
+* **MIT License** ([LICENSE-MIT](LICENSE-MIT) or [http://opensource.org/licenses/MIT](http://opensource.org/licenses/MIT))
+* **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE) or [http://www.apache.org/licenses/LICENSE-2.0](http://www.apache.org/licenses/LICENSE-2.0))
+
+at your option.

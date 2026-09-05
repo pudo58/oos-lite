@@ -1,6 +1,8 @@
-﻿use std::fs::File;
+use std::collections::HashMap;
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use crate::chunk::ChunkId;
 use crate::error::{OosLiteError, Result};
@@ -9,25 +11,45 @@ use super::writer::segment_file_name;
 
 pub struct SegmentReader {
     segments_dir: PathBuf,
+    cache: Mutex<HashMap<u64, File>>,
 }
 
 impl SegmentReader {
     pub fn new<P: AsRef<Path>>(segments_dir: P) -> Self {
         Self {
             segments_dir: segments_dir.as_ref().to_path_buf(),
+            cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn clear_cache(&self) {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.clear();
         }
     }
 
     /// Random reads a chunk from segment file, verifying CRC32C and BLAKE3 hash.
+    /// Reuses open file descriptors via an in-memory handle cache.
     pub fn read_chunk(&self, chunk_id: &ChunkId, location: &ChunkLocation) -> Result<Vec<u8>> {
-        let seg_path = self.segments_dir.join(segment_file_name(location.segment_id));
-        let mut file = File::open(&seg_path).map_err(|e| {
-            OosLiteError::Internal(format!(
-                "Failed to open segment file {}: {}",
-                seg_path.display(),
-                e
-            ))
+        let mut cache = self.cache.lock().map_err(|e| {
+            OosLiteError::Internal(format!("SegmentReader cache lock poisoned: {e}"))
         })?;
+
+        let seg_id = location.segment_id;
+        let file = if let Some(f) = cache.get_mut(&seg_id) {
+            f
+        } else {
+            let seg_path = self.segments_dir.join(segment_file_name(seg_id));
+            let f = File::open(&seg_path).map_err(|e| {
+                OosLiteError::Internal(format!(
+                    "Failed to open segment file {}: {}",
+                    seg_path.display(),
+                    e
+                ))
+            })?;
+            cache.insert(seg_id, f);
+            cache.get_mut(&seg_id).unwrap()
+        };
 
         // Read Record Header
         file.seek(SeekFrom::Start(location.record_offset))?;

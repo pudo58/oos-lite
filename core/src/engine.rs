@@ -93,9 +93,11 @@ impl StorageEngine {
             let mut max_lsn = wal.checkpoint_lsn();
             for record in uncheckpointed {
                 if let WalRecordPayload::PutObject(put) = record.payload {
-                    // Step 1: Replay chunks into SegmentStore
-                    for (_chunk_id, chunk_data) in &put.chunks {
-                        let _ = segment_store.put_chunk(chunk_data)?;
+                    // Step 1: Replay chunks into SegmentStore (if not already present)
+                    for (chunk_id, chunk_data) in &put.chunks {
+                        if !chunk_data.is_empty() && !segment_store.has_chunk(chunk_id) {
+                            let _ = segment_store.put_chunk(chunk_data)?;
+                        }
                     }
                     segment_store.sync()?;
 
@@ -183,13 +185,16 @@ impl StorageEngine {
         let chunker = Chunker::new(&data);
         let raw_chunks = chunker.chunks();
 
-        let mut chunks_with_ids = Vec::with_capacity(raw_chunks.len());
+        let mut new_chunks_for_wal = Vec::new();
         let mut chunk_ids = Vec::with_capacity(raw_chunks.len());
 
-        for c in raw_chunks {
+        for c in &raw_chunks {
             let cid = ChunkId::from_data(c);
             chunk_ids.push(cid);
-            chunks_with_ids.push((cid, c.to_vec()));
+            // Only new chunks that are not yet persisted in segment_store need to be in WAL
+            if !self.segment_store.has_chunk(&cid) {
+                new_chunks_for_wal.push((cid, c.to_vec()));
+            }
         }
 
         let manifest = Manifest::new(chunk_ids, total_bytes, content_hash);
@@ -214,7 +219,7 @@ impl StorageEngine {
             object_id,
             version,
             manifest: manifest.clone(),
-            chunks: chunks_with_ids.clone(),
+            chunks: new_chunks_for_wal,
         };
 
         let lsn = {
@@ -226,10 +231,10 @@ impl StorageEngine {
 
         check_crash_point("after_wal_fsync");
 
-        // Step 2: Write chunks into SegmentStore + sync
+        // Step 2: Write chunks into SegmentStore + sync directly from memory slices
         let mut new_chunks = 0;
         let mut dedup_chunks = 0;
-        for (_cid, chunk_data) in &chunks_with_ids {
+        for chunk_data in raw_chunks {
             let (_id, is_new) = self.segment_store.put_chunk(chunk_data)?;
             if is_new {
                 new_chunks += 1;
@@ -514,7 +519,16 @@ impl StorageEngine {
                     ))
                 })?;
 
-            let out_path = target_dir.join(&entry.name);
+            // Sanitize entry.name to prevent path traversal (e.g. '../' or absolute paths)
+            let safe_relative_path = Path::new(&entry.name)
+                .components()
+                .filter_map(|c| match c {
+                    std::path::Component::Normal(p) => Some(p),
+                    _ => None,
+                })
+                .collect::<PathBuf>();
+
+            let out_path = target_dir.join(safe_relative_path);
             self.extract_manifest_to_file(&manifest, &out_path)?;
         }
 

@@ -149,12 +149,16 @@ fn format_relative_time(ts_secs: u64) -> String {
     }
 }
 
-pub fn start_ui_server(engine: Arc<StorageEngine>, port: u16, no_open: bool) -> anyhow::Result<()> {
-    let addr = format!("0.0.0.0:{}", port);
+pub fn start_ui_server(engine: Arc<StorageEngine>, host: &str, port: u16, no_open: bool) -> anyhow::Result<()> {
+    let addr = format!("{}:{}", host, port);
     let server = Server::http(&addr)
         .map_err(|e| anyhow::anyhow!("Failed to bind UI server on {}: {}", addr, e))?;
 
-    let local_url = format!("http://localhost:{}", port);
+    let local_url = if host == "0.0.0.0" {
+        format!("http://localhost:{}", port)
+    } else {
+        format!("http://{}:{}", host, port)
+    };
 
     println!("============================================================");
     println!("       OOS-Lite Web UI Dashboard running at:");
@@ -314,9 +318,19 @@ fn handle_request(engine: Arc<StorageEngine>, mut request: tiny_http::Request) -
 
         (Method::Post, "/api/upload") => {
             let name_query = parsed_url.query_pairs().find(|(k, _)| k == "name");
-            let file_name = name_query
+            let raw_name = name_query
                 .map(|(_, v)| v.replace('\\', "/"))
                 .unwrap_or_else(|| "unnamed_file".to_string());
+
+            let safe_name = Path::new(&raw_name)
+                .components()
+                .filter_map(|c| match c {
+                    std::path::Component::Normal(p) => p.to_str(),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+            let file_name = if safe_name.is_empty() { "unnamed_file".to_string() } else { safe_name };
 
             let tmp_dir = std::env::temp_dir();
             let now_ns = SystemTime::now()
@@ -436,19 +450,26 @@ fn handle_request(engine: Arc<StorageEngine>, mut request: tiny_http::Request) -
             let mut body = String::new();
             let _ = request.as_reader().read_to_string(&mut body);
             match serde_json::from_str::<SnapshotRestoreReq>(&body) {
-                Ok(req) => match engine.restore_snapshot(&req.label, Path::new(&req.dir)) {
-                    Ok(count) => {
-                        let resp = SuccessResponse {
-                            ok: true,
-                            message: Some(format!("Restored {} files", count)),
-                            count: Some(count),
-                        };
-                        let _ = request.respond(json_response(&resp));
+                Ok(req) => {
+                    let dir_str = req.dir.trim();
+                    if dir_str.is_empty() || dir_str.contains("..") {
+                        let _ = request.respond(error_response(400, "Invalid or disallowed restore directory path"));
+                        return Ok(());
                     }
-                    Err(e) => {
-                        let _ = request.respond(error_response(400, &e.to_string()));
+                    match engine.restore_snapshot(&req.label, Path::new(dir_str)) {
+                        Ok(count) => {
+                            let resp = SuccessResponse {
+                                ok: true,
+                                message: Some(format!("Restored {} files", count)),
+                                count: Some(count),
+                            };
+                            let _ = request.respond(json_response(&resp));
+                        }
+                        Err(e) => {
+                            let _ = request.respond(error_response(400, &e.to_string()));
+                        }
                     }
-                },
+                }
                 Err(e) => {
                     let _ = request.respond(error_response(400, &format!("Invalid JSON: {}", e)));
                 }
