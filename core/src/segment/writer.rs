@@ -6,7 +6,7 @@ use tracing::{debug, info};
 use crate::chunk::ChunkId;
 use crate::error::Result;
 use super::format::{
-    ChunkLocation, RecordHeader, SegmentHeader, DEFAULT_MAX_SEGMENT_SIZE,
+    ChunkLocation, CompressionCodec, RecordHeader, SegmentHeader, DEFAULT_MAX_SEGMENT_SIZE,
     RECORD_HEADER_SIZE, SEGMENT_HEADER_SIZE,
 };
 use super::index::SegmentIndex;
@@ -73,14 +73,24 @@ impl SegmentWriter {
         self.max_segment_size
     }
 
-    /// Appends a chunk to the active segment. Rotates segment if current segment is full.
+    /// Appends a chunk to the active segment.
+    /// Deduplication identity (chunk_id) was already computed on raw data via BLAKE3.
+    /// Evaluates conditional compression (Zstandard level 3): stores compressed if savings >= 5%.
     pub fn append_chunk(
         &mut self,
         chunk_id: ChunkId,
         data: &[u8],
         index: &SegmentIndex,
     ) -> Result<ChunkLocation> {
-        let record_size = (RECORD_HEADER_SIZE + data.len()) as u64;
+        let compressed = zstd::encode_all(data, 3);
+        let (payload_bytes, codec): (&[u8], CompressionCodec) = match &compressed {
+            Ok(comp) if (comp.len() as u64) < (data.len() as u64 * 95 / 100) => {
+                (comp.as_slice(), CompressionCodec::Zstd)
+            }
+            _ => (data, CompressionCodec::None),
+        };
+
+        let record_size = (RECORD_HEADER_SIZE + payload_bytes.len()) as u64;
 
         if self.current_offset + record_size > self.max_segment_size {
             self.rotate()?;
@@ -89,19 +99,20 @@ impl SegmentWriter {
         let record_offset = self.current_offset;
         let payload_offset = record_offset + RECORD_HEADER_SIZE as u64;
 
-        let record_header = RecordHeader::new(chunk_id, data);
+        let record_header = RecordHeader::new(chunk_id, codec, data.len() as u32, payload_bytes);
         let file = self.current_file.as_mut().ok_or_else(|| {
             crate::error::OosLiteError::Internal("SegmentWriter file handle is closed".to_string())
         })?;
         record_header.write_to(file)?;
-        file.write_all(data)?;
+        file.write_all(payload_bytes)?;
         file.flush()?;
 
         let location = ChunkLocation {
             segment_id: self.current_segment_id,
             record_offset,
             payload_offset,
-            payload_len: data.len() as u32,
+            payload_len: payload_bytes.len() as u32,
+            raw_len: data.len() as u32,
         };
 
         self.current_offset += record_size;
@@ -111,12 +122,15 @@ impl SegmentWriter {
             chunk_id = %chunk_id,
             segment_id = self.current_segment_id,
             offset = record_offset,
-            size = data.len(),
+            raw_size = data.len(),
+            stored_size = payload_bytes.len(),
+            codec = ?codec,
             "Appended chunk to segment"
         );
 
         Ok(location)
     }
+
 
     pub fn sync(&mut self) -> Result<()> {
         if let Some(ref mut f) = self.current_file {

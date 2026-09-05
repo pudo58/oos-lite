@@ -1,4 +1,4 @@
-﻿//! Append-only segment store (~256 MiB per segment file).
+//! Append-only segment store (~256 MiB per segment file).
 
 pub mod format;
 pub mod index;
@@ -139,4 +139,102 @@ mod tests {
             assert_eq!(store.get_chunk(&new_id).unwrap(), new_data);
         }
     }
+
+    #[test]
+    fn test_chunk_compression_compressible_data() {
+        let dir = tempdir().expect("tempdir failed");
+        let store = SegmentStore::new(dir.path()).expect("store init failed");
+
+        // 16 KiB of highly repetitive text (compressible)
+        let pattern = b"OOS-Lite storage engine with zstandard transparent compression! ";
+        let mut raw_data = Vec::with_capacity(16 * 1024);
+        while raw_data.len() < 16 * 1024 {
+            raw_data.extend_from_slice(pattern);
+        }
+
+        let (id, is_new) = store.put_chunk(&raw_data).expect("put chunk failed");
+        assert!(is_new);
+
+        // Verify ChunkId was computed on raw data
+        assert_eq!(id, crate::chunk::ChunkId::from_data(&raw_data));
+
+        // Verify physical stored size is drastically smaller (< 20% of raw size)
+        let location = store.get_location(&id).expect("chunk not in index");
+        assert_eq!(location.raw_len, raw_data.len() as u32);
+        assert!(
+            location.payload_len < (location.raw_len / 5),
+            "Expected payload_len ({} bytes) to be < 20% of raw_len ({} bytes)",
+            location.payload_len, location.raw_len
+        );
+
+        // Verify decompression extracts byte-for-byte identical content
+        let read_data = store.get_chunk(&id).expect("read chunk failed");
+        assert_eq!(read_data, raw_data);
+    }
+
+    #[test]
+    fn test_chunk_compression_incompressible_data() {
+        let dir = tempdir().expect("tempdir failed");
+        let store = SegmentStore::new(dir.path()).expect("store init failed");
+
+        // High entropy pseudo-random sequence (incompressible)
+        let mut raw_data = vec![0u8; 1024];
+        let mut x: u32 = 123456789;
+        for byte in &mut raw_data {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            *byte = (x & 0xFF) as u8;
+        }
+
+        let (id, is_new) = store.put_chunk(&raw_data).expect("put chunk failed");
+        assert!(is_new);
+
+        // Verify that because compression did not save >= 5%, it was saved as raw bytes
+        let location = store.get_location(&id).expect("chunk not in index");
+        assert_eq!(location.raw_len, raw_data.len() as u32);
+        assert_eq!(location.payload_len, raw_data.len() as u32);
+
+        let read_data = store.get_chunk(&id).expect("read chunk failed");
+        assert_eq!(read_data, raw_data);
+    }
+
+    #[test]
+    fn test_chunk_compression_bitrot_corruption_detected() {
+        use std::fs::OpenOptions;
+        use std::io::{Seek, SeekFrom, Write};
+
+        let dir = tempdir().expect("tempdir failed");
+        let store = SegmentStore::new(dir.path()).expect("store init failed");
+
+        let raw_data = b"Predictable text for testing bit-rot CRC32C detection before decompression".repeat(20);
+        let (id, _) = store.put_chunk(&raw_data).expect("put chunk failed");
+        store.sync().expect("sync failed");
+
+        let location = store.get_location(&id).expect("chunk not in index");
+
+        // Flip a byte in the physical stored payload on disk
+        let seg_path = dir.path().join("segment_00000001.seg");
+        let mut file = OpenOptions::new().read(true).write(true).open(&seg_path).expect("open failed");
+        file.seek(SeekFrom::Start(location.payload_offset)).expect("seek failed");
+        let mut byte = [0u8; 1];
+        std::io::Read::read_exact(&mut file, &mut byte).expect("read byte failed");
+        byte[0] ^= 0xFF; // flip bits
+        file.seek(SeekFrom::Start(location.payload_offset)).expect("seek failed");
+        file.write_all(&byte).expect("write corrupted byte failed");
+        file.sync_all().expect("sync failed");
+
+        // Clear reader cache so it re-reads from disk
+        store.clear_cache();
+
+
+        // Reading the chunk must fail at the CRC32C physical verification step
+        let result = store.get_chunk(&id);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::error::OosLiteError::ChecksumMismatch { .. } => {} // Expected
+            other => panic!("Expected ChecksumMismatch, got: {:?}", other),
+        }
+    }
 }
+

@@ -8,6 +8,7 @@ pub mod manifest;
 pub mod object;
 pub mod segment;
 pub mod snapshot;
+pub mod vfs;
 pub mod wal;
 
 pub use chunk::{ChunkId, Chunker};
@@ -18,6 +19,8 @@ pub use gc::{GarbageCollector, GcStats};
 pub use manifest::Manifest;
 pub use object::{ObjectId, ObjectRecord, ObjectVersion};
 pub use snapshot::{Snapshot, SnapshotEntry};
+pub use vfs::{DecompressedChunkCache, VfsNode, VfsNodeType, VfsTree};
+
 
 #[cfg(test)]
 mod tests {

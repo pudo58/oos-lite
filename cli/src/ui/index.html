@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OOS-Lite — Content-Addressed Storage Dashboard</title>
+  <title>OOS-Lite Desktop</title>
   <!-- Tailwind CSS via CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- Chart.js via CDN -->
@@ -96,18 +96,22 @@
         </div>
       </div>
 
-      <!-- STATUS & REFRESH -->
-      <div class="flex items-center space-x-3">
-        <div class="hidden sm:flex items-center space-x-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/25 text-emerald-400 text-xs font-medium">
-          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
-          <span>Engine Active</span>
-        </div>
+      <!-- VIRTUAL DRIVE MOUNT CONTROLLER -->
+      <div class="flex items-center space-x-2.5">
+        <button id="mount-toggle-btn" onclick="toggleMountFromUi()" class="flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold shadow-sm transition-all border border-indigo-500/50 bg-indigo-600 hover:bg-indigo-500 text-white active:scale-95 cursor-pointer" title="Bật/Tắt ổ đĩa ảo Z:">
+          <span id="mount-dot" class="w-2 h-2 rounded-full bg-slate-300"></span>
+          <span id="mount-status-text">Kết Nối Ổ Đĩa Z:\</span>
+        </button>
 
-        <button onclick="refreshAll(true)" id="refresh-btn" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700/80 text-slate-300 text-xs font-medium border border-slate-700/60 transition-all active:scale-95" title="Refresh Dashboard">
+        <button id="open-explorer-btn" onclick="openDriveExplorer()" class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-200 transition-all active:scale-95" title="Mở thư mục trong Windows Explorer">
+          <svg class="w-3.5 h-3.5 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path></svg>
+          <span id="open-explorer-text">Mở Ổ Z:\</span>
+        </button>
+
+        <button onclick="refreshAll(true)" id="refresh-btn" class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 text-slate-300 text-xs font-medium border border-slate-700/60 transition-all active:scale-95" title="Đồng bộ lại">
           <svg id="refresh-icon" class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
           </svg>
-          <span>Sync</span>
         </button>
       </div>
     </div>
@@ -144,6 +148,33 @@
     <!-- TAB 1: OVERVIEW -->
     <!-- ========================================================================= -->
     <div id="view-overview" class="space-y-6">
+
+      <!-- VIRTUAL DRIVE DESKTOP BANNER -->
+      <div id="drive-banner" class="card rounded-2xl p-5 bg-gradient-to-r from-slate-900/90 via-indigo-950/30 to-slate-900/90 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-lg">
+        <div class="flex items-center gap-4">
+          <div id="drive-icon-box" class="w-12 h-12 rounded-xl bg-slate-800 text-slate-400 flex items-center justify-center font-black text-xl border border-slate-700 transition-all">
+            Z:
+          </div>
+          <div>
+            <div class="flex items-center gap-2.5">
+              <h3 id="drive-banner-title" class="text-sm font-bold text-white">Ổ Đĩa Ảo OOS-Lite: Z:\ (Chưa kết nối)</h3>
+              <span id="drive-badge" class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-800 text-slate-400 border border-slate-700">Offline</span>
+            </div>
+            <p id="drive-banner-desc" class="text-xs text-slate-400 mt-1">Bấm nút "Kết Nối Ổ Đĩa" để mount ổ đĩa ảo vào Windows Explorer.</p>
+          </div>
+        </div>
+        <div class="flex items-center gap-2.5 self-end sm:self-center shrink-0">
+          <button id="banner-mount-btn" onclick="toggleMountFromUi()" class="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold shadow-md shadow-indigo-600/30 transition-all flex items-center gap-2 active:scale-95 cursor-pointer">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+            <span id="banner-mount-text">⚡ Kết Nối Ổ Đĩa Z:\</span>
+          </button>
+          <button id="banner-open-btn" onclick="openDriveExplorer()" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium border border-slate-700 transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path></svg>
+            <span>Mở Explorer</span>
+          </button>
+        </div>
+      </div>
+
       <!-- 4 STAT METRICS -->
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <!-- METRIC 1 -->
@@ -691,7 +722,7 @@
       const icon = document.getElementById('refresh-icon');
       if (icon) icon.classList.add('animate-spin');
       try {
-        await Promise.all([loadStats(), loadFiles(), loadSnapshots()]);
+        await Promise.all([loadStats(), loadFiles(), loadSnapshots(), fetchMountStatus()]);
         if (showFeedback) showToast('Sync Completed', 'All store states refreshed.', 'success');
       } catch (err) {
         showToast('Sync Error', err.message, 'error');
@@ -1322,8 +1353,140 @@
       }
     }
 
-    // Initial load
+    // =========================================================================
+    // VIRTUAL DRIVE MOUNT CONTROLS
+    // =========================================================================
+    let cachedMountStatus = null;
+
+    async function fetchMountStatus() {
+      try {
+        const res = await fetch('/api/mount/status');
+        if (!res.ok) return;
+        const data = await res.json();
+        cachedMountStatus = data;
+        updateMountUi(data);
+      } catch (err) {
+        console.warn('Mount status fetch failed:', err);
+      }
+    }
+
+    function updateMountUi(data) {
+      const toggleBtn = document.getElementById('mount-toggle-btn');
+      const dot = document.getElementById('mount-dot');
+      const statusText = document.getElementById('mount-status-text');
+      const openBtnText = document.getElementById('open-explorer-text');
+      const bannerTitle = document.getElementById('drive-banner-title');
+      const bannerDesc = document.getElementById('drive-banner-desc');
+      const bannerBadge = document.getElementById('drive-badge');
+      const iconBox = document.getElementById('drive-icon-box');
+      const bannerMountBtn = document.getElementById('banner-mount-btn');
+      const bannerMountText = document.getElementById('banner-mount-text');
+      const bannerOpenBtn = document.getElementById('banner-open-btn');
+
+      const letter = data.drive_letter || (data.drive ? data.drive.replace(':', '') : 'Z');
+
+      if (openBtnText) openBtnText.innerText = `Mở Ổ ${letter}:\\`;
+
+      if (data.mounted) {
+        // Header button: Active state
+        if (dot) dot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
+        if (toggleBtn) {
+          toggleBtn.className = 'flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold shadow-sm transition-all border border-emerald-500/40 bg-emerald-500/20 text-emerald-300 hover:bg-rose-500/20 hover:text-rose-300 hover:border-rose-500/40 active:scale-95 cursor-pointer';
+          toggleBtn.title = `Bấm để ngắt kết nối ổ ${letter}:`;
+        }
+        if (statusText) statusText.innerText = `Ổ ${letter}: Đã Kết Nối (Bấm để ngắt)`;
+
+        // Banner: Active state
+        if (bannerTitle) bannerTitle.innerText = `Ổ Đĩa Ảo OOS-Lite: ${letter}:\\ (Đang hoạt động)`;
+        if (bannerDesc) bannerDesc.innerText = 'Đang kết nối trực tiếp vào Windows Explorer. Mở video bằng VLC, xem code bằng VS Code hoặc copy file bình thường.';
+        if (bannerBadge) {
+          bannerBadge.className = 'px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30';
+          bannerBadge.innerText = 'Active';
+        }
+        if (iconBox) {
+          iconBox.className = 'w-12 h-12 rounded-xl bg-indigo-500/20 text-indigo-300 flex items-center justify-center font-black text-xl border border-indigo-500/30 shadow-inner';
+        }
+        if (bannerMountBtn) {
+          bannerMountBtn.className = 'px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-rose-900/30 text-slate-300 hover:text-rose-300 border border-slate-700 hover:border-rose-500/40 text-xs font-medium transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer';
+        }
+        if (bannerMountText) bannerMountText.innerText = `Ngắt Kết Nối Ổ ${letter}:\\`;
+        if (bannerOpenBtn) {
+          bannerOpenBtn.className = 'px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer';
+        }
+      } else {
+        // Header button: Connect CTA state
+        if (dot) dot.className = 'w-2 h-2 rounded-full bg-indigo-200';
+        if (toggleBtn) {
+          toggleBtn.className = 'flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold shadow-md transition-all border border-indigo-400/50 bg-indigo-600 hover:bg-indigo-500 text-white active:scale-95 cursor-pointer';
+          toggleBtn.title = `Bấm để kết nối ổ đĩa ảo ${letter}: vào Windows`;
+        }
+        if (statusText) statusText.innerText = `⚡ Kết Nối Ổ Đĩa ${letter}:\\`;
+
+        // Banner: Disconnected CTA state
+        if (bannerTitle) bannerTitle.innerText = `Ổ Đĩa Ảo OOS-Lite: ${letter}:\\ (Chưa kết nối)`;
+        if (bannerDesc) bannerDesc.innerText = data.error ? `Lỗi: ${data.error}` : 'Bấm nút "Kết Nối Ổ Đĩa" bên phải để gắn ổ ảo vào Windows Explorer và duyệt file.';
+        if (bannerBadge) {
+          bannerBadge.className = 'px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-800 text-slate-400 border border-slate-700';
+          bannerBadge.innerText = 'Offline';
+        }
+        if (iconBox) {
+          iconBox.className = 'w-12 h-12 rounded-xl bg-slate-800 text-slate-500 flex items-center justify-center font-black text-xl border border-slate-700';
+        }
+        if (bannerMountBtn) {
+          bannerMountBtn.className = 'px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold shadow-md shadow-indigo-600/30 transition-all flex items-center gap-2 active:scale-95 cursor-pointer';
+        }
+        if (bannerMountText) bannerMountText.innerText = `⚡ Kết Nối Ổ Đĩa ${letter}:\\`;
+        if (bannerOpenBtn) {
+          bannerOpenBtn.className = 'px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium border border-slate-700 transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer';
+        }
+      }
+    }
+
+    async function toggleMountFromUi() {
+      const toggleBtn = document.getElementById('mount-toggle-btn');
+      const bannerBtn = document.getElementById('banner-mount-btn');
+      if (toggleBtn) toggleBtn.disabled = true;
+      if (bannerBtn) bannerBtn.disabled = true;
+      try {
+        const res = await fetch('/api/mount/toggle', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) {
+          showToast('Mount Error', data.error || 'Thao tác mount thất bại', 'error');
+          return;
+        }
+        cachedMountStatus = data;
+        updateMountUi(data);
+        if (data.mounted) {
+          showToast('Đã Kết Nối Ổ Ảo', `Ổ ${data.drive_letter || 'Z'}:\\ đã sẵn sàng trong Windows Explorer.`, 'success');
+        } else {
+          showToast('Đã Ngắt Kết Nối', `Ổ ${data.drive_letter || 'Z'}:\\ đã được ngắt an toàn.`, 'info');
+        }
+      } catch (err) {
+        showToast('Mount Error', err.message, 'error');
+      } finally {
+        if (toggleBtn) toggleBtn.disabled = false;
+        if (bannerBtn) bannerBtn.disabled = false;
+        await fetchMountStatus();
+      }
+    }
+
+    async function openDriveExplorer() {
+      try {
+        const res = await fetch('/api/mount/open', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          showToast('Explorer Launched', 'Đã mở thư mục ổ Z:\\ trong Windows Explorer.', 'success');
+        } else {
+          showToast('Chưa Kết Nối', data.error || 'Hãy bấm Kết Nối Ổ Đĩa trước.', 'warning');
+        }
+      } catch (err) {
+        showToast('Launch Error', err.message, 'error');
+      }
+    }
+
+    // Initial load & Polling
     refreshAll();
+    setInterval(fetchMountStatus, 4000);
   </script>
 </body>
 </html>

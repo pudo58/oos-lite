@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "oos-lite-core"
 version.workspace = true
 edition.workspace = true
@@ -11,6 +11,8 @@ fastcdc = { workspace = true }
 sled = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+zstd = { workspace = true }
+
 
 [dev-dependencies]
 tempfile = "3.8"

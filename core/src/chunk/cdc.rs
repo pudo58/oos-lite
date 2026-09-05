@@ -1,4 +1,4 @@
-﻿use fastcdc::FastCDC;
+use fastcdc::FastCDC;
 
 pub const MIN_CHUNK_SIZE: usize = 16 * 1024;   // 16 KiB
 pub const TARGET_CHUNK_SIZE: usize = 64 * 1024; // 64 KiB
@@ -61,6 +61,79 @@ impl<'a> Chunker<'a> {
             });
         }
         result
+    }
+}
+
+/// Streaming chunker that processes arbitrary `std::io::Read` streams with bounded memory (O(MAX_CHUNK_SIZE) RAM).
+pub struct StreamChunker<R> {
+    reader: R,
+    buffer: Vec<u8>,
+    min: usize,
+    target: usize,
+    max: usize,
+    eof_reached: bool,
+}
+
+impl<R: std::io::Read> StreamChunker<R> {
+    pub fn new(reader: R) -> Self {
+        Self::with_sizes(reader, MIN_CHUNK_SIZE, TARGET_CHUNK_SIZE, MAX_CHUNK_SIZE)
+    }
+
+    pub fn with_sizes(reader: R, min: usize, target: usize, max: usize) -> Self {
+        Self {
+            reader,
+            buffer: Vec::with_capacity(max * 4),
+            min,
+            target,
+            max,
+            eof_reached: false,
+        }
+    }
+
+    /// Pulls the next chunk from the stream.
+    /// Memory consumption is strictly bounded by ~1 MiB regardless of total stream size.
+    pub fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, std::io::Error> {
+        loop {
+            // When we have at least `max` bytes, or EOF has been reached:
+            if self.buffer.len() >= self.max || (self.eof_reached && !self.buffer.is_empty()) {
+                if self.buffer.len() <= self.min && self.eof_reached {
+                    let chunk = std::mem::take(&mut self.buffer);
+                    return Ok(Some(chunk));
+                }
+
+                let cdc = FastCDC::new(&self.buffer, self.min, self.target, self.max);
+                if let Some(entry) = cdc.into_iter().next() {
+                    let chunk = self.buffer[entry.offset..entry.offset + entry.length].to_vec();
+                    let consumed = entry.offset + entry.length;
+                    self.buffer.drain(..consumed);
+                    return Ok(Some(chunk));
+                } else if self.eof_reached {
+                    if !self.buffer.is_empty() {
+                        let chunk = std::mem::take(&mut self.buffer);
+                        return Ok(Some(chunk));
+                    }
+                    return Ok(None);
+                }
+            }
+
+            if self.eof_reached {
+                if !self.buffer.is_empty() {
+                    let chunk = std::mem::take(&mut self.buffer);
+                    return Ok(Some(chunk));
+                }
+                return Ok(None);
+            }
+
+            // Read the next block from reader
+            let prev_len = self.buffer.len();
+            let read_size = (self.max * 2).max(512 * 1024);
+            self.buffer.resize(prev_len + read_size, 0);
+            let n = self.reader.read(&mut self.buffer[prev_len..])?;
+            self.buffer.truncate(prev_len + n);
+            if n == 0 {
+                self.eof_reached = true;
+            }
+        }
     }
 }
 
@@ -135,5 +208,27 @@ mod tests {
             mod_chunks.last().unwrap(),
             "Last chunk must be identical"
         );
+    }
+
+    #[test]
+    fn test_stream_chunker_matches_slice_chunker() {
+        // 512 KiB payload
+        let mut data = Vec::with_capacity(512 * 1024);
+        for i in 0..(512 * 1024) {
+            data.push(((i * 41 + 19) % 256) as u8);
+        }
+
+        let slice_chunks = Chunker::new(&data).chunks();
+
+        let mut stream_chunker = StreamChunker::new(&data[..]);
+        let mut streamed_chunks = Vec::new();
+        while let Some(chunk) = stream_chunker.next_chunk().unwrap() {
+            streamed_chunks.push(chunk);
+        }
+
+        assert_eq!(slice_chunks.len(), streamed_chunks.len(), "Chunk count mismatch");
+        for (i, (sc, st)) in slice_chunks.iter().zip(streamed_chunks.iter()).enumerate() {
+            assert_eq!(*sc, &st[..], "Chunk #{} content mismatch", i);
+        }
     }
 }

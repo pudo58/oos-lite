@@ -1,4 +1,4 @@
-﻿[workspace]
+[workspace]
 members = [
     "core",
     "cli",
@@ -23,3 +23,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4.4", features = ["derive"] }
 criterion = { version = "0.5", features = ["html_reports"] }
+zstd = "0.13"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+

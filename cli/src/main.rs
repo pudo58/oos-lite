@@ -5,6 +5,7 @@ use tracing::info;
 use oos_lite_core::StorageEngine;
 
 mod ui;
+mod mount;
 
 #[derive(Parser, Debug)]
 #[command(name = "oos-lite", author, version, about = "OOS-Lite Content-Addressed File Storage CLI", long_about = None)]
@@ -57,6 +58,8 @@ enum Commands {
     Gc,
     #[command(about = "Verify data integrity")]
     Fsck,
+    #[command(about = "Launch OOS-Lite Native Desktop Application", alias = "desktop", alias = "gui")]
+    App,
     #[command(about = "Launch embedded Web UI Dashboard")]
     Ui {
         #[arg(long, help = "Host address to listen on", default_value = "127.0.0.1")]
@@ -65,6 +68,21 @@ enum Commands {
         port: u16,
         #[arg(long, help = "Do not automatically open browser")]
         no_open: bool,
+    },
+    #[command(about = "Mount OOS-Lite store as a read-only filesystem (FUSE / WebDAV)")]
+    Mount {
+        #[arg(help = "Mount point directory path (Linux/macOS) or Drive letter like Z: (Windows)")]
+        target: Option<String>,
+        #[arg(long, help = "Force WebDAV mode", default_value_t = false)]
+        webdav: bool,
+        #[arg(long, help = "WebDAV server port", default_value_t = 8080)]
+        port: u16,
+        #[arg(
+            long,
+            help = "Memory cache limit in MiB for decompressed chunks",
+            default_value_t = 128
+        )]
+        cache_mb: usize,
     },
 }
 
@@ -244,8 +262,14 @@ fn main() -> anyhow::Result<()> {
             }
             println!("============================================================");
         }
+        Commands::App => {
+            ui::start_ui_server(engine, "127.0.0.1", 3000, false, true)?;
+        }
         Commands::Ui { host, port, no_open } => {
-            ui::start_ui_server(engine, &host, port, no_open)?;
+            ui::start_ui_server(engine, &host, port, no_open, false)?;
+        }
+        Commands::Mount { target, webdav, port, cache_mb } => {
+            mount::mount(engine, target.as_deref(), webdav, port, cache_mb)?;
         }
     }
 

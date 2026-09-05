@@ -2,7 +2,7 @@
 
 [![Language](https://img.shields.io/badge/language-Rust%202021-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-39%20passed%20%7C%20100%25-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-49%20passed%20%7C%20100%25-brightgreen.svg)]()
 [![Engine](https://img.shields.io/badge/storage-Append--Only%20Segments%20%2B%20Sled-success.svg)]()
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey.svg)]()
 
@@ -33,10 +33,10 @@
 Traditional file backups relying on `cp`, `rsync`, or basic archive utilities suffer from exponential storage growth when saving multiple iterations of large files or directory trees. OOS-Lite solves this by operating at the **sub-file chunk level**:
 
 1. **Content-Defined Chunking (FastCDC):** Files are partitioned dynamically based on data content rather than fixed offsets. Editing a few bytes in the middle of a large file only produces new chunks for the modified region; all unchanged blocks are deduplicated.
-2. **Instant Zero-Copy Snapshots ($O(1)$):** Point-in-time snapshots capture the state of the entire store by referencing B-Tree index roots. Creating a snapshot takes sub-millisecond time and consumes zero additional disk space for file payloads.
+2. **Instant Zero-Copy Snapshots:** Point-in-time snapshots capture the logical state of the entire store in sub-millisecond time and consume zero additional disk space for file payloads.
 3. **Absolute Crash Consistency:** Utilizing append-only segment storage and a redo-only Write-Ahead Log (WAL) with CRC32C verification, the engine guarantees data integrity even during sudden power outages or `kill -9` process termination.
-4. **Constant-Memory Garbage Collection ($O(1)$ RAM):** The mark-and-sweep compactor streams live chunks directly between segment files without buffering datasets into system memory, preventing Out-Of-Memory (OOM) crashes on multi-gigabyte stores.
-5. **Zero OS Kernel Dependencies:** Runs completely in user-space as a portable binary or embedded library across Linux, macOS, and Windows.
+4. **Streaming Garbage Collection:** The mark-and-sweep compactor streams live chunks directly between segment files without buffering chunk payloads into system memory, preventing Out-Of-Memory (OOM) crashes on multi-gigabyte stores.
+5. **User-Space Virtual Filesystem:** Mounts seamlessly in user-space via Windows Native WebDAV (zero kernel drivers required) and Linux/macOS POSIX FUSE.
 
 ---
 
@@ -194,6 +194,22 @@ oos-lite fsck
 oos-lite ui --host 127.0.0.1 --port 3000
 ```
 
+### Virtual Filesystem (FUSE Mount — Linux / macOS / WSL2)
+
+```bash
+# Mount the store as a read-only POSIX directory with 128 MiB LRU chunk cache
+oos-lite mount /mnt/oos-drive
+
+# Custom chunk cache memory limit (e.g., 256 MiB)
+oos-lite mount /mnt/oos-drive --cache-mb 256
+
+# Explore the virtual directory hierarchy:
+# /mnt/oos-drive/current/               -> Latest versions of all files
+# /mnt/oos-drive/snapshots/<label>/     -> Complete state of snapshots
+# /mnt/oos-drive/history/<path>/<file>@v<N> -> All historical versions
+# /mnt/oos-drive/history/<path>/<file>@latest -> Virtual symlink to latest version
+```
+
 ---
 
 ## 5. On-Disk Storage Layout
@@ -271,6 +287,8 @@ oos-lite/
 | **Embedded Web** | [`tiny_http`](https://crates.io/crates/tiny_http) | Lightweight, non-async embedded HTTP server |
 | **Diagnostics** | [`tracing`](https://crates.io/crates/tracing) | High-performance structured logging |
 | **Error Handling** | [`thiserror`](https://crates.io/crates/thiserror) / [`anyhow`](https://crates.io/crates/anyhow) | Idiomatic Rust error hierarchies |
+| **Compression** | [`zstd`](https://crates.io/crates/zstd) | High-speed Zstandard chunk compression with adaptive threshold |
+| **FUSE Driver** | [`fuser`](https://crates.io/crates/fuser) | Userspace POSIX filesystem driver (Linux / macOS / WSL2) |
 | **Benchmarking** | [`criterion`](https://crates.io/crates/criterion) | Microbenchmarking and statistical regression analysis |
 
 ---
@@ -301,7 +319,7 @@ The resulting binary will be available at `./target/release/oos-lite` (or `./tar
 ### Running Tests
 
 ```bash
-# Run all unit, integration, crash-recovery, and E2E tests (39 tests)
+# Run all unit, integration, crash-recovery, and E2E tests (49 tests)
 cargo test --workspace
 ```
 
@@ -332,6 +350,9 @@ All core milestones from the OOS-Lite engineering specification have been succes
 - [x] **Milestone 8 — CLI & Diagnostics:** Complete `clap` interface, storage metrics (`stats`), integrity auditing (`fsck`), and Path Traversal sanitization.
 - [x] **Milestone 9 — Real-World Benchmarks:** Comparative benchmark runner measuring deduplication savings and latency against traditional copy mechanisms.
 - [x] **Milestone 10 — Embedded Web UI Dashboard:** Responsive single-page application with real-time metrics, interactive File Explorer, in-browser previews, and drag-and-drop uploads.
+- [x] **Milestone 11 — Transparent Chunk Compression (Zstd):** Conditional per-chunk compression (<95% threshold) with physical CRC32C validation, keeping BLAKE3 hashing strictly on raw uncompressed bytes to preserve 100% deduplication.
+- [x] **Milestone 12 — Read-Only FUSE Virtual Filesystem (Milestone 2A):** Zero-copy POSIX mounting exposing `/current`, `/snapshots`, and `/history` with virtual symlinks, on-demand FastCDC chunk reassembly, LRU bounded memory cache, and strict read-only syscall protections.
+- [x] **Milestone 13 — Native Windows WebDAV Drive Mount (Milestone 2B):** Zero-driver Windows mounting via standard WebDAV (`\\127.0.0.1@<port>\DavWWWRoot`), Fake `LOCK`/`UNLOCK` Windows Explorer handshake, multi-threaded request processing, dynamic registry inspection for file size caps, and automated `Ctrl+C` drive unmapping.
 
 ---
 

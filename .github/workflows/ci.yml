@@ -1,0 +1,37 @@
+name: CI / Multi-Platform Build & Test
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        rust: [stable]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain (${{ matrix.rust }})
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: clippy, rustfmt
+
+      - name: Install Linux System Dependencies (FUSE 3)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse3-dev pkg-config
+
+      - name: Check Workspace Compilation
+        run: cargo check --workspace --all-targets
+
+      - name: Run Full Workspace Tests
+        run: cargo test --workspace --verbose

@@ -177,8 +177,10 @@ impl SegmentStore {
                                 record_offset: current_offset,
                                 payload_offset,
                                 payload_len: header.payload_len,
+                                raw_len: header.raw_len,
                             },
                         );
+
 
                         current_offset += record_len;
                     }
@@ -226,7 +228,9 @@ impl SegmentStore {
             return Ok((chunk_id, false));
         }
 
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = self.writer.lock().map_err(|e| {
+            OosLiteError::Internal(format!("SegmentWriter mutex poisoned: {e}"))
+        })?;
         // Double check after lock
         if self.index.contains(&chunk_id) {
             return Ok((chunk_id, false));
@@ -246,13 +250,24 @@ impl SegmentStore {
     }
 
     pub fn sync(&self) -> Result<()> {
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = self.writer.lock().map_err(|e| {
+            OosLiteError::Internal(format!("SegmentWriter mutex poisoned: {e}"))
+        })?;
         writer.sync()
     }
 
     pub fn chunk_count(&self) -> usize {
         self.index.len()
     }
+
+    pub fn get_location(&self, id: &ChunkId) -> Option<ChunkLocation> {
+        self.index.get(id)
+    }
+
+    pub fn clear_cache(&self) {
+        self.reader.clear_cache();
+    }
+
 
     pub fn reclaim_unreachable_chunks(&self, reachable: &std::collections::HashSet<ChunkId>) -> usize {
         self.index.retain(|id, _loc| reachable.contains(id))
@@ -280,8 +295,16 @@ impl SegmentStore {
 
         let max_seg_size = writer_guard.max_segment_size();
 
-        // 2. Prepare temporary staging directory
-        let tmp_compact_dir = self.segments_dir.join(format!(".compact_tmp_{}", std::process::id()));
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let tmp_compact_dir = self.segments_dir.join(format!(
+            ".compact_tmp_{}_{:?}_{}",
+            std::process::id(),
+            std::thread::current().id(),
+            now_ns
+        ));
         if tmp_compact_dir.exists() {
             let _ = fs::remove_dir_all(&tmp_compact_dir);
         }
@@ -370,6 +393,11 @@ impl SegmentStore {
     pub fn unique_payload_bytes(&self) -> u64 {
         self.index.total_payload_bytes()
     }
+
+    pub fn unique_raw_bytes(&self) -> u64 {
+        self.index.total_raw_bytes()
+    }
+
 
     pub fn segments_dir(&self) -> &Path {
         &self.segments_dir

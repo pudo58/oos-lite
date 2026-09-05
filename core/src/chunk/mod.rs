@@ -1,10 +1,10 @@
-﻿//! Chunk engine: FastCDC, BLAKE3 content addressing, CRC32C verification.
+//! Chunk engine: FastCDC, BLAKE3 content addressing, CRC32C verification.
 
 pub mod cdc;
 pub mod id;
 pub mod store;
 
-pub use cdc::{ChunkCut, Chunker, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE, TARGET_CHUNK_SIZE};
+pub use cdc::{ChunkCut, Chunker, StreamChunker, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE, TARGET_CHUNK_SIZE};
 pub use id::ChunkId;
 pub use store::{Chunk, ChunkStore};
 

@@ -1,10 +1,11 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
-use crate::chunk::{ChunkId, Chunker};
+use crate::chunk::{ChunkId, StreamChunker};
 use crate::error::{OosLiteError, Result};
 use crate::index::MetadataStore;
 use crate::gc::{GarbageCollector, GcStats};
@@ -68,6 +69,8 @@ pub struct StorageEngine {
     segment_store: SegmentStore,
     metadata_store: MetadataStore,
     wal: Mutex<Wal>,
+    op_lock: RwLock<()>,
+    gc_lock: Mutex<()>,
 }
 
 impl StorageEngine {
@@ -144,6 +147,8 @@ impl StorageEngine {
             segment_store,
             metadata_store,
             wal: Mutex::new(wal),
+            op_lock: RwLock::new(()),
+            gc_lock: Mutex::new(()),
         })
     }
 
@@ -154,6 +159,8 @@ impl StorageEngine {
     pub fn metadata_store(&self) -> &MetadataStore {
         &self.metadata_store
     }
+
+
 
     /// Stores a file with an associated logical name (e.g. "a.txt" or "docs/photo.jpg").
     /// If the name already exists, creates a new version of the existing ObjectID.
@@ -175,29 +182,33 @@ impl StorageEngine {
             )));
         }
 
-        let mut file = File::open(file_path)?;
-        let mut data = Vec::new();
-        file.read_to_end(&mut data)?;
+        // Prevent race condition with concurrent GC
+        let _op_guard = self.op_lock.read().map_err(|e| {
+            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
+        })?;
 
-        let total_bytes = data.len() as u64;
-        let content_hash = *blake3::hash(&data).as_bytes();
+        let file = File::open(file_path)?;
+        let reader = BufReader::new(file);
+        let mut stream_chunker = StreamChunker::new(reader);
 
-        let chunker = Chunker::new(&data);
-        let raw_chunks = chunker.chunks();
-
+        let mut hasher = blake3::Hasher::new();
+        let mut total_bytes = 0u64;
+        let mut chunk_ids = Vec::new();
         let mut new_chunks_for_wal = Vec::new();
-        let mut chunk_ids = Vec::with_capacity(raw_chunks.len());
 
-        for c in &raw_chunks {
-            let cid = ChunkId::from_data(c);
+        while let Some(chunk) = stream_chunker.next_chunk()? {
+            total_bytes += chunk.len() as u64;
+            hasher.update(&chunk);
+            let cid = ChunkId::from_data(&chunk);
             chunk_ids.push(cid);
-            // Only new chunks that are not yet persisted in segment_store need to be in WAL
             if !self.segment_store.has_chunk(&cid) {
-                new_chunks_for_wal.push((cid, c.to_vec()));
+                new_chunks_for_wal.push((cid, chunk));
             }
+            // Deduplicated chunks are dropped immediately from memory here
         }
 
-        let manifest = Manifest::new(chunk_ids, total_bytes, content_hash);
+        let content_hash = *hasher.finalize().as_bytes();
+        let manifest = Manifest::new(chunk_ids.clone(), total_bytes, content_hash);
 
         // Determine ObjectId & version target
         let (object_id, version) = match self.metadata_store.resolve_name(name)? {
@@ -219,7 +230,7 @@ impl StorageEngine {
             object_id,
             version,
             manifest: manifest.clone(),
-            chunks: new_chunks_for_wal,
+            chunks: new_chunks_for_wal.clone(),
         };
 
         let lsn = {
@@ -233,15 +244,13 @@ impl StorageEngine {
 
         // Step 2: Write chunks into SegmentStore + sync directly from memory slices
         let mut new_chunks = 0;
-        let mut dedup_chunks = 0;
-        for chunk_data in raw_chunks {
+        for (_cid, chunk_data) in &new_chunks_for_wal {
             let (_id, is_new) = self.segment_store.put_chunk(chunk_data)?;
             if is_new {
                 new_chunks += 1;
-            } else {
-                dedup_chunks += 1;
             }
         }
+        let dedup_chunks = chunk_ids.len().saturating_sub(new_chunks);
         self.segment_store.sync()?;
 
         check_crash_point("after_chunk_write");
@@ -347,7 +356,17 @@ impl StorageEngine {
             fs::create_dir_all(parent)?;
         }
 
-        let tmp_path = out_path.with_extension(format!("tmp.{}", std::process::id()));
+        let now_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let thread_id = std::thread::current().id();
+        let tmp_path = out_path.with_extension(format!(
+            "tmp.{}.{:?}.{}",
+            std::process::id(),
+            thread_id,
+            now_ns
+        ));
         let mut hasher = blake3::Hasher::new();
         let mut written_bytes = 0u64;
 
@@ -450,6 +469,10 @@ impl StorageEngine {
     /// Creates an O(1) point-in-time snapshot of the entire name index namespace.
     /// Does NOT copy any physical chunks (zero-copy / reference-only).
     pub fn create_snapshot(&self, label: &str) -> Result<Snapshot> {
+        let _op_guard = self.op_lock.read().map_err(|e| {
+            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
+        })?;
+
         let label = label.trim();
         if label.is_empty() {
             return Err(OosLiteError::Internal("Snapshot label cannot be empty".to_string()));
@@ -500,6 +523,10 @@ impl StorageEngine {
 
     /// Restores all files captured in a snapshot into target_dir.
     pub fn restore_snapshot<P: AsRef<Path>>(&self, label: &str, target_dir: P) -> Result<usize> {
+        let _op_guard = self.op_lock.read().map_err(|e| {
+            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
+        })?;
+
         let label = label.trim();
         let snapshot = self.metadata_store.get_snapshot(label)?.ok_or_else(|| {
             OosLiteError::SnapshotNotFound(label.to_string())
@@ -587,7 +614,8 @@ impl StorageEngine {
         }
 
         let total_chunks = self.segment_store.chunk_count();
-        let unique_chunks_bytes = self.segment_store.unique_payload_bytes();
+        let unique_chunks_bytes = self.segment_store.unique_raw_bytes();
+
 
         let seg_disk = self.segment_store.physical_disk_bytes().unwrap_or(0);
         let meta_disk = dir_size(&self.root_dir.join("metadata.db"));
@@ -631,6 +659,10 @@ impl StorageEngine {
 
     /// Deletes a file entry from the name index and cleans up its associated object record.
     pub fn delete_file(&self, name: &str) -> Result<bool> {
+        let _op_guard = self.op_lock.write().map_err(|e| {
+            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
+        })?;
+
         let name = name.trim();
         if let Some(object_id) = self.metadata_store.unbind_name(name)? {
             let _ = self.metadata_store.delete_object(&object_id);
@@ -644,6 +676,10 @@ impl StorageEngine {
 
     /// Deletes a snapshot by label.
     pub fn delete_snapshot(&self, label: &str) -> Result<bool> {
+        let _op_guard = self.op_lock.write().map_err(|e| {
+            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
+        })?;
+
         let deleted = self.metadata_store.delete_snapshot(label.trim())?;
         if deleted {
             self.metadata_store.flush()?;
@@ -654,6 +690,16 @@ impl StorageEngine {
 
     /// Runs a full Mark-and-Sweep Garbage Collection cycle.
     pub fn gc(&self) -> Result<GcStats> {
+        // 1. Serialize GC invocations to prevent staging directory corruption
+        let _gc_guard = self.gc_lock.lock().map_err(|e| {
+            OosLiteError::Internal(format!("StorageEngine gc_lock poisoned: {e}"))
+        })?;
+
+        // 2. Block all concurrent Put operations during both Mark & Sweep phases
+        let _op_guard = self.op_lock.write().map_err(|e| {
+            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
+        })?;
+
         GarbageCollector::collect(&self.segment_store, &self.metadata_store)
     }
 

@@ -209,7 +209,7 @@ impl FsckRunner {
 
                     report.chunks_checked += 1;
 
-                    // Verify CRC32C
+                    // 1. Physical Layer: Verify CRC32C of stored bytes on disk
                     let actual_crc = crc32fast::hash(&payload);
                     if actual_crc != header.payload_crc {
                         report.corrupted_chunks += 1;
@@ -223,17 +223,41 @@ impl FsckRunner {
                         ));
                     }
 
-                    // Verify BLAKE3 Content Identity
-                    let actual_id = ChunkId::from_data(&payload);
-                    if actual_id != header.chunk_id {
-                        report.corrupted_chunks += 1;
-                        report.errors.push(format!(
-                            "Segment file {} at offset {} chunk ID mismatch: expected {}, actual {}",
-                            path.display(),
-                            offset,
-                            header.chunk_id,
-                            actual_id
-                        ));
+                    // 2. Decompress if Zstd, otherwise use raw bytes
+                    let decompressed_result = match header.compression_codec {
+                        crate::segment::format::CompressionCodec::None => Ok(payload),
+                        crate::segment::format::CompressionCodec::Zstd => {
+                            zstd::decode_all(&payload[..]).map_err(|e| {
+                                format!(
+                                    "Segment file {} failed to decompress zstd chunk {} at offset {}: {}",
+                                    path.display(),
+                                    header.chunk_id,
+                                    offset,
+                                    e
+                                )
+                            })
+                        }
+                    };
+
+                    // 3. Logical Layer: Verify BLAKE3 Content Identity on decompressed bytes
+                    match decompressed_result {
+                        Ok(raw_data) => {
+                            let actual_id = ChunkId::from_data(&raw_data);
+                            if actual_id != header.chunk_id {
+                                report.corrupted_chunks += 1;
+                                report.errors.push(format!(
+                                    "Segment file {} at offset {} chunk ID mismatch: expected {}, actual {}",
+                                    path.display(),
+                                    offset,
+                                    header.chunk_id,
+                                    actual_id
+                                ));
+                            }
+                        }
+                        Err(err_msg) => {
+                            report.corrupted_chunks += 1;
+                            report.errors.push(err_msg);
+                        }
                     }
 
                     physical_chunk_ids.insert(header.chunk_id);

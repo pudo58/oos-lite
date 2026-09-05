@@ -357,4 +357,77 @@ fn test_milestone7_gc_shared_chunks_graph() {
     assert_eq!(engine2.segment_store().chunk_count(), 0);
 }
 
+#[test]
+fn test_concurrent_put_and_gc_no_data_loss() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let dir = tempdir().expect("tempdir failed");
+    let store_dir = dir.path().join("store");
+    let engine = Arc::new(StorageEngine::open(&store_dir).expect("engine open failed"));
+
+    // Prepare 10 distinct files
+    let mut file_paths = Vec::new();
+    let mut file_payloads = Vec::new();
+    for i in 0..10 {
+        let p = dir.path().join(format!("test_input_{}.bin", i));
+        let mut data = Vec::with_capacity(128 * 1024);
+        for j in 0..(128 * 1024) {
+            data.push(((i * 73 + j * 17) % 256) as u8);
+        }
+        std::fs::write(&p, &data).unwrap();
+        file_paths.push(p);
+        file_payloads.push(data);
+    }
+
+    let file_paths = Arc::new(file_paths);
+    let mut handles = Vec::new();
+
+    // Spawn 4 concurrent writers
+    for worker_id in 0..4 {
+        let engine_clone = Arc::clone(&engine);
+        let paths_clone = Arc::clone(&file_paths);
+        handles.push(thread::spawn(move || {
+            for round in 0..5 {
+                let file_idx = (worker_id * 2 + round) % paths_clone.len();
+                let name = format!("worker_{}_round_{}.bin", worker_id, round);
+                let _ = engine_clone.put_file_named(&name, &paths_clone[file_idx]).unwrap();
+            }
+        }));
+    }
+
+    // Spawn concurrent GC thread
+    let gc_engine = Arc::clone(&engine);
+    let gc_handle = thread::spawn(move || {
+        for _ in 0..4 {
+            thread::sleep(std::time::Duration::from_millis(10));
+            let _ = gc_engine.gc();
+        }
+    });
+
+    for h in handles {
+        h.join().unwrap();
+    }
+    gc_handle.join().unwrap();
+
+    // Verify all stored files can be extracted with 100% integrity
+    for worker_id in 0..4 {
+        for round in 0..5 {
+            let file_idx = (worker_id * 2 + round) % 10;
+            let name = format!("worker_{}_round_{}.bin", worker_id, round);
+            let out_path = dir.path().join(format!("extracted_{}", name));
+            let bytes = engine.get_file(&name, &out_path).unwrap();
+            assert_eq!(bytes, file_payloads[file_idx].len() as u64);
+            assert_eq!(std::fs::read(&out_path).unwrap(), file_payloads[file_idx]);
+        }
+    }
+
+    // Run fsck to prove store is 100% healthy
+    let report = engine.fsck().unwrap();
+    assert!(report.is_healthy, "Store must be completely healthy after concurrent put and gc");
+    assert_eq!(report.corrupted_chunks, 0);
+    assert_eq!(report.missing_chunks, 0);
+}
+
+
 

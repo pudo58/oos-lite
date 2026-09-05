@@ -79,4 +79,10 @@ impl SegmentIndex {
         let map = self.locations.read().unwrap();
         map.values().map(|loc| loc.payload_len as u64).sum()
     }
+
+    pub fn total_raw_bytes(&self) -> u64 {
+        let map = self.locations.read().unwrap();
+        map.values().map(|loc| loc.raw_len as u64).sum()
+    }
 }
+

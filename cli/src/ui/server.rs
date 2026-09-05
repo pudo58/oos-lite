@@ -1,5 +1,6 @@
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
@@ -9,6 +10,25 @@ use url::Url;
 use oos_lite_core::StorageEngine;
 
 const INDEX_HTML: &str = include_str!("index.html");
+
+#[derive(Default)]
+pub struct MountController {
+    pub is_mounted: bool,
+    pub drive_letter: Option<char>,
+    pub port: u16,
+    pub stop_flag: Option<Arc<AtomicBool>>,
+}
+
+#[derive(Serialize)]
+struct ApiMountStatus {
+    mounted: bool,
+    drive: Option<String>,
+    drive_letter: String,
+    port: u16,
+    service_status: String,
+    file_size_limit_bytes: Option<u64>,
+    message: Option<String>,
+}
 
 #[derive(Serialize)]
 struct ApiStats {
@@ -149,7 +169,13 @@ fn format_relative_time(ts_secs: u64) -> String {
     }
 }
 
-pub fn start_ui_server(engine: Arc<StorageEngine>, host: &str, port: u16, no_open: bool) -> anyhow::Result<()> {
+pub fn start_ui_server(
+    engine: Arc<StorageEngine>,
+    host: &str,
+    port: u16,
+    no_open: bool,
+    is_desktop: bool,
+) -> anyhow::Result<()> {
     let addr = format!("{}:{}", host, port);
     let server = Server::http(&addr)
         .map_err(|e| anyhow::anyhow!("Failed to bind UI server on {}: {}", addr, e))?;
@@ -161,11 +187,94 @@ pub fn start_ui_server(engine: Arc<StorageEngine>, host: &str, port: u16, no_ope
     };
 
     println!("============================================================");
-    println!("       OOS-Lite Web UI Dashboard running at:");
+    if is_desktop {
+        println!("       OOS-Lite Desktop Application running at:");
+    } else {
+        println!("       OOS-Lite Web UI Dashboard running at:");
+    }
     println!("       {}", local_url);
     println!("       Listening on: {}", addr);
-    println!("       Press Ctrl+C to stop the dashboard server.");
+    println!("       Press Ctrl+C to exit.");
     println!("============================================================");
+
+    let mount_ctrl = Arc::new(Mutex::new(MountController::default()));
+
+    // Create desktop shortcut if requested on Windows
+    #[cfg(windows)]
+    if is_desktop {
+        let mut candidates = Vec::new();
+        if let Ok(od) = std::env::var("OneDrive") {
+            candidates.push(std::path::PathBuf::from(od).join("Desktop"));
+        }
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            let p = std::path::PathBuf::from(&profile);
+            candidates.push(p.join("OneDrive").join("Desktop"));
+            candidates.push(p.join("Desktop"));
+        }
+
+        if let Ok(exe_path) = std::env::current_exe() {
+            let cur_dir = std::env::current_dir().unwrap_or_default();
+            let content = format!("@echo off\r\ncd /d \"{}\"\r\nstart \"\" \"{}\" app\r\n", cur_dir.display(), exe_path.display());
+            for desktop_dir in candidates {
+                if desktop_dir.exists() {
+                    let bat_file = desktop_dir.join("OOS-Lite.bat");
+                    if std::fs::write(&bat_file, &content).is_ok() {
+                        println!("  [✓] Created Desktop shortcut: {}", bat_file.display());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Auto-mount in desktop mode for instant gratification
+    if is_desktop {
+        let mut ctrl = mount_ctrl.lock().unwrap();
+        let mount_port = 8080u16;
+        let stop_flag = Arc::new(AtomicBool::new(true));
+        let r = Arc::clone(&stop_flag);
+
+        if crate::mount::webdav::start_webdav_server(
+            Arc::clone(&engine),
+            "127.0.0.1",
+            mount_port,
+            128,
+            8,
+            r,
+        ).is_ok() {
+            #[cfg(windows)]
+            let mut drive = None;
+            #[cfg(windows)]
+            {
+                let preflight = crate::mount::windows::run_preflight_check();
+                if preflight.service_status == crate::mount::windows::WebClientStatus::Running {
+                    if crate::mount::windows::map_drive('Z', mount_port).is_ok() {
+                        drive = Some('Z');
+                    }
+                }
+            }
+
+            ctrl.is_mounted = true;
+            ctrl.port = mount_port;
+            ctrl.stop_flag = Some(stop_flag);
+            #[cfg(windows)]
+            {
+                ctrl.drive_letter = drive;
+            }
+        }
+    }
+
+    // Setup cleanup handler on Ctrl+C
+    let cleanup_ctrl = Arc::clone(&mount_ctrl);
+    let _ = ctrlc::set_handler(move || {
+        println!("\n[!] Exiting OOS-Lite...");
+        let ctrl = cleanup_ctrl.lock().unwrap();
+        #[cfg(windows)]
+        if let Some(ch) = ctrl.drive_letter {
+            let _ = crate::mount::windows::unmap_drive(ch);
+        }
+        std::process::exit(0);
+    });
 
     if !no_open {
         let open_url = local_url.clone();
@@ -173,9 +282,35 @@ pub fn start_ui_server(engine: Arc<StorageEngine>, host: &str, port: u16, no_ope
             std::thread::sleep(std::time::Duration::from_millis(300));
             #[cfg(target_os = "windows")]
             {
-                let _ = std::process::Command::new("cmd")
-                    .args(["/C", "start", &open_url])
-                    .spawn();
+                let edge_paths = [
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+                ];
+                let mut opened = false;
+                if is_desktop {
+                    let profile_dir = std::env::temp_dir().join("oos_lite_desktop_profile");
+                    let profile_arg = format!("--user-data-dir={}", profile_dir.display());
+                    for p in &edge_paths {
+                        if std::path::Path::new(p).exists() {
+                            let _ = std::process::Command::new(p)
+                                .args([
+                                    &format!("--app={}", open_url),
+                                    "--window-size=1200,820",
+                                    &profile_arg,
+                                    "--no-first-run",
+                                    "--no-default-browser-check",
+                                ])
+                                .spawn();
+                            opened = true;
+                            break;
+                        }
+                    }
+                }
+                if !opened {
+                    let _ = std::process::Command::new("cmd")
+                        .args(["/C", "start", &open_url])
+                        .spawn();
+                }
             }
             #[cfg(target_os = "macos")]
             {
@@ -192,8 +327,9 @@ pub fn start_ui_server(engine: Arc<StorageEngine>, host: &str, port: u16, no_ope
 
     for request in server.incoming_requests() {
         let engine_clone = Arc::clone(&engine);
+        let mount_ctrl_clone = Arc::clone(&mount_ctrl);
         std::thread::spawn(move || {
-            if let Err(e) = handle_request(engine_clone, request) {
+            if let Err(e) = handle_request(engine_clone, mount_ctrl_clone, request) {
                 error!("Request error: {:?}", e);
             }
         });
@@ -202,7 +338,11 @@ pub fn start_ui_server(engine: Arc<StorageEngine>, host: &str, port: u16, no_ope
     Ok(())
 }
 
-fn handle_request(engine: Arc<StorageEngine>, mut request: tiny_http::Request) -> anyhow::Result<()> {
+fn handle_request(
+    engine: Arc<StorageEngine>,
+    mount_ctrl: Arc<Mutex<MountController>>,
+    mut request: tiny_http::Request,
+) -> anyhow::Result<()> {
     let parsed_url = Url::parse(&format!("http://localhost{}", request.url()))?;
     let path = parsed_url.path().to_string();
     let method = request.method().clone();
@@ -394,9 +534,8 @@ fn handle_request(engine: Arc<StorageEngine>, mut request: tiny_http::Request) -
 
                 match engine.get_file_version(&target_str, version, &tmp_path) {
                     Ok(_) => {
-                        match std::fs::read(&tmp_path) {
-                            Ok(bytes) => {
-                                let _ = std::fs::remove_file(&tmp_path);
+                        match std::fs::File::open(&tmp_path) {
+                            Ok(file) => {
                                 let download_name = Path::new(&target_str)
                                     .file_name()
                                     .and_then(|s| s.to_str())
@@ -404,12 +543,13 @@ fn handle_request(engine: Arc<StorageEngine>, mut request: tiny_http::Request) -
                                 let disp_val = format!("attachment; filename=\"{}\"", download_name);
                                 let disp = Header::from_bytes(&b"Content-Disposition"[..], disp_val.as_bytes()).unwrap();
                                 let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/octet-stream"[..]).unwrap();
-                                let resp = Response::from_data(bytes).with_header(disp).with_header(ct);
+                                let resp = Response::from_file(file).with_header(disp).with_header(ct);
                                 let _ = request.respond(resp);
+                                let _ = std::fs::remove_file(&tmp_path);
                             }
                             Err(e) => {
                                 let _ = std::fs::remove_file(&tmp_path);
-                                let _ = request.respond(error_response(500, &format!("Read error: {}", e)));
+                                let _ = request.respond(error_response(500, &format!("Open error: {}", e)));
                             }
                         }
                     }
@@ -452,8 +592,10 @@ fn handle_request(engine: Arc<StorageEngine>, mut request: tiny_http::Request) -
             match serde_json::from_str::<SnapshotRestoreReq>(&body) {
                 Ok(req) => {
                     let dir_str = req.dir.trim();
-                    if dir_str.is_empty() || dir_str.contains("..") {
-                        let _ = request.respond(error_response(400, "Invalid or disallowed restore directory path"));
+                    let dir_path = Path::new(dir_str);
+                    let has_parent_traversal = dir_path.components().any(|c| matches!(c, std::path::Component::ParentDir));
+                    if dir_str.is_empty() || has_parent_traversal {
+                        let _ = request.respond(error_response(400, "Invalid or disallowed restore directory path (relative traversal detected)"));
                         return Ok(());
                     }
                     match engine.restore_snapshot(&req.label, Path::new(dir_str)) {
@@ -558,6 +700,150 @@ fn handle_request(engine: Arc<StorageEngine>, mut request: tiny_http::Request) -
                 Err(e) => {
                     let _ = request.respond(error_response(500, &e.to_string()));
                 }
+            }
+        }
+
+        (Method::Get, "/api/mount/status") => {
+            let mut ctrl = mount_ctrl.lock().unwrap_or_else(|p| p.into_inner());
+            #[cfg(windows)]
+            {
+                let mapped = crate::mount::windows::is_drive_mapped('Z');
+                ctrl.is_mounted = mapped;
+                ctrl.drive_letter = if mapped { Some('Z') } else { None };
+            }
+
+            #[cfg(windows)]
+            let report = crate::mount::windows::run_preflight_check();
+
+            #[cfg(windows)]
+            let status_str = match report.service_status {
+                crate::mount::windows::WebClientStatus::Running => "RUNNING".to_string(),
+                crate::mount::windows::WebClientStatus::Stopped => "STOPPED".to_string(),
+                crate::mount::windows::WebClientStatus::NotFound => "NOT_FOUND".to_string(),
+                crate::mount::windows::WebClientStatus::Unknown(ref s) => s.clone(),
+            };
+            #[cfg(not(windows))]
+            let status_str = "POSIX_FUSE".to_string();
+
+            #[cfg(windows)]
+            let limit_bytes = report.file_size_limit_bytes;
+            #[cfg(not(windows))]
+            let limit_bytes = None;
+
+            let resp = ApiMountStatus {
+                mounted: ctrl.is_mounted,
+                drive: ctrl.drive_letter.map(|c| format!("{}:", c)),
+                drive_letter: "Z".to_string(),
+                port: if ctrl.port == 0 { 8080 } else { ctrl.port },
+                service_status: status_str,
+                file_size_limit_bytes: limit_bytes,
+                message: None,
+            };
+            let _ = request.respond(json_response(&resp));
+        }
+
+        (Method::Post, "/api/mount/toggle") => {
+            let mut ctrl = mount_ctrl.lock().unwrap_or_else(|p| p.into_inner());
+            let port = if ctrl.port == 0 { 8080 } else { ctrl.port };
+
+            // Ensure WebDAV server is active in background
+            if ctrl.stop_flag.is_none() {
+                let stop_flag = Arc::new(AtomicBool::new(true));
+                let r = Arc::clone(&stop_flag);
+                let _ = crate::mount::webdav::start_webdav_server(
+                    Arc::clone(&engine),
+                    "127.0.0.1",
+                    port,
+                    128,
+                    8,
+                    r,
+                );
+                ctrl.stop_flag = Some(stop_flag);
+                ctrl.port = port;
+            }
+
+            #[cfg(windows)]
+            {
+                let is_mapped = crate::mount::windows::is_drive_mapped('Z');
+                if is_mapped {
+                    let _ = crate::mount::windows::unmap_drive('Z');
+                    ctrl.is_mounted = false;
+                    ctrl.drive_letter = None;
+                } else {
+                    let preflight = crate::mount::windows::run_preflight_check();
+                    if preflight.service_status != crate::mount::windows::WebClientStatus::Running {
+                        let _ = request.respond(error_response(400, "Dịch vụ WebClient của Windows đang tắt. Hãy mở CMD (Admin) gõ: net start WebClient"));
+                        return Ok(());
+                    }
+                    match crate::mount::windows::map_drive('Z', port) {
+                        Ok(()) => {
+                            ctrl.is_mounted = true;
+                            ctrl.drive_letter = Some('Z');
+                        }
+                        Err(e) => {
+                            let _ = request.respond(error_response(500, &format!("Không thể gắn ổ Z: {}", e)));
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+
+            #[cfg(windows)]
+            let report = crate::mount::windows::run_preflight_check();
+            #[cfg(windows)]
+            let status_str = match report.service_status {
+                crate::mount::windows::WebClientStatus::Running => "RUNNING".to_string(),
+                crate::mount::windows::WebClientStatus::Stopped => "STOPPED".to_string(),
+                crate::mount::windows::WebClientStatus::NotFound => "NOT_FOUND".to_string(),
+                crate::mount::windows::WebClientStatus::Unknown(ref s) => s.clone(),
+            };
+            #[cfg(not(windows))]
+            let status_str = "POSIX_FUSE".to_string();
+
+            let resp = ApiMountStatus {
+                mounted: ctrl.is_mounted,
+                drive: ctrl.drive_letter.map(|c| format!("{}:", c)),
+                drive_letter: "Z".to_string(),
+                port: ctrl.port,
+                service_status: status_str,
+                file_size_limit_bytes: None,
+                message: if ctrl.is_mounted {
+                    Some("Đã kết nối ổ Z:\\ thành công".to_string())
+                } else {
+                    Some("Đã ngắt kết nối ổ Z:\\ an toàn".to_string())
+                },
+            };
+            let _ = request.respond(json_response(&resp));
+        }
+
+        (Method::Post, "/api/mount/open") => {
+            let _ctrl = mount_ctrl.lock().unwrap_or_else(|p| p.into_inner());
+            #[cfg(windows)]
+            {
+                let is_mapped = crate::mount::windows::is_drive_mapped('Z');
+                if is_mapped {
+                    let _ = std::process::Command::new("explorer.exe")
+                        .arg(r"Z:\")
+                        .spawn();
+                    let resp = SuccessResponse {
+                        ok: true,
+                        message: Some("Đã mở ổ Z:\\ trong Windows Explorer".to_string()),
+                        count: None,
+                    };
+                    let _ = request.respond(json_response(&resp));
+                } else {
+                    let _ = request.respond(error_response(400, "Ổ Z:\\ chưa được kết nối. Hãy bấm nút 'Kết Nối Ổ Đĩa' trước."));
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = &_ctrl;
+                let resp = SuccessResponse {
+                    ok: true,
+                    message: Some("Explorer not supported on POSIX".to_string()),
+                    count: None,
+                };
+                let _ = request.respond(json_response(&resp));
             }
         }
 
