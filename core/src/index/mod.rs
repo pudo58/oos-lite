@@ -1,10 +1,10 @@
 //! Name index (path -> ObjectID) and Object index (ObjectID -> manifest) powered by sled.
 
 use std::path::Path;
-use sled::{Db, Tree};
+use sled::{Db, Transactional, Tree};
 use tracing::info;
 
-use crate::error::Result;
+use crate::error::{OosLiteError, Result};
 use crate::manifest::Manifest;
 use crate::object::{ObjectId, ObjectRecord};
 
@@ -67,6 +67,49 @@ impl MetadataStore {
             }
         }
         Ok(None)
+    }
+
+    /// Atomically renames a logical name binding in a single transaction, preserving the ObjectId.
+    pub fn rename_name_binding(&self, old_name: &str, new_name: &str) -> Result<bool> {
+        use sled::transaction::TransactionResult;
+        let res: TransactionResult<bool, OosLiteError> =
+            self.tree_names.transaction(|names| {
+                if let Some(ivec) = names.remove(old_name.as_bytes())? {
+                    names.insert(new_name.as_bytes(), ivec)?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            });
+
+        match res {
+            Ok(b) => Ok(b),
+            Err(sled::transaction::TransactionError::Abort(e)) => Err(e),
+            Err(sled::transaction::TransactionError::Storage(e)) => Err(OosLiteError::Database(e)),
+        }
+    }
+
+    /// Atomically unbinds name and deletes associated object record in a single transaction.
+    pub fn delete_named_object(&self, name: &str) -> Result<Option<ObjectId>> {
+        use sled::transaction::TransactionResult;
+        let res: TransactionResult<Option<ObjectId>, OosLiteError> =
+            (&self.tree_names, &self.tree_objects).transaction(|(names, objects)| {
+                if let Some(ivec) = names.remove(name.as_bytes())? {
+                    if ivec.len() == 16 {
+                        let mut bytes = [0u8; 16];
+                        bytes.copy_from_slice(&ivec);
+                        objects.remove(bytes.as_slice())?;
+                        return Ok(Some(ObjectId::from_raw(bytes)));
+                    }
+                }
+                Ok(None)
+            });
+
+        match res {
+            Ok(opt) => Ok(opt),
+            Err(sled::transaction::TransactionError::Abort(e)) => Err(e),
+            Err(sled::transaction::TransactionError::Storage(e)) => Err(OosLiteError::Database(e)),
+        }
     }
 
     /// Removes an ObjectRecord from object_index.

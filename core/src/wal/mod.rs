@@ -7,8 +7,10 @@ pub use format::{WalPutPayload, WalRecord, WalRecordPayload, WalRecordType, WAL_
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::{info, warn};
 
+use crate::crypto::VaultKey;
 use crate::error::{OosLiteError, Result};
 
 pub struct Wal {
@@ -18,10 +20,15 @@ pub struct Wal {
     file: File,
     current_lsn: u64,
     checkpoint_lsn: u64,
+    vault_key: Option<Arc<VaultKey>>,
 }
 
 impl Wal {
     pub fn open<P: AsRef<Path>>(wal_dir: P) -> Result<Self> {
+        Self::open_with_vault(wal_dir, None)
+    }
+
+    pub fn open_with_vault<P: AsRef<Path>>(wal_dir: P, vault_key: Option<Arc<VaultKey>>) -> Result<Self> {
         let dir = wal_dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir)?;
 
@@ -68,7 +75,7 @@ impl Wal {
                 break;
             }
 
-            match WalRecord::decode(remaining) {
+            match WalRecord::decode_with_vault(remaining, vault_key.as_deref()) {
                 Ok((record, consumed)) => {
                     if record.lsn > current_lsn {
                         current_lsn = record.lsn;
@@ -116,6 +123,7 @@ impl Wal {
             file,
             current_lsn,
             checkpoint_lsn,
+            vault_key,
         })
     }
 
@@ -130,7 +138,7 @@ impl Wal {
     pub fn append_put_and_sync(&mut self, payload: WalPutPayload) -> Result<u64> {
         self.current_lsn += 1;
         let record = WalRecord::new_put(self.current_lsn, payload);
-        let encoded = record.encode();
+        let encoded = record.encode_with_vault(self.vault_key.as_deref())?;
 
         self.file.write_all(&encoded)?;
         self.file.sync_all()?;
@@ -159,7 +167,7 @@ impl Wal {
                 break;
             }
 
-            match WalRecord::decode(remaining) {
+            match WalRecord::decode_with_vault(remaining, self.vault_key.as_deref()) {
                 Ok((record, consumed)) => {
                     offset += consumed;
                     if record.lsn > self.checkpoint_lsn {

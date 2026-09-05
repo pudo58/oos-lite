@@ -24,6 +24,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4.4", features = ["derive"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 zstd = "0.13"
+fs2 = "0.4"
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
+rand_core = { version = "0.6", features = ["std"] }
+zeroize = { version = "1.7", features = ["derive"] }
+notify = "6.1"
+walkdir = "2.5"
+glob = "0.3"
 
 [profile.release]
 opt-level = 3

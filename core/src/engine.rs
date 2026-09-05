@@ -1,11 +1,13 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+use fs2::FileExt;
 use tracing::{info, warn};
 
 use crate::chunk::{ChunkId, StreamChunker};
+use crate::crypto::VaultKey;
 use crate::error::{OosLiteError, Result};
 use crate::index::MetadataStore;
 use crate::gc::{GarbageCollector, GcStats};
@@ -40,6 +42,81 @@ pub struct EngineStats {
     pub space_savings_pct: f64,
 }
 
+/// Helper function to validate logical file names
+pub fn validate_logical_name(name: &str) -> Result<()> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(OosLiteError::InvalidName {
+            name: name.to_string(),
+            reason: "Logical file name cannot be empty".to_string(),
+        });
+    }
+
+    if trimmed == "." || trimmed == ".." {
+        return Err(OosLiteError::InvalidName {
+            name: name.to_string(),
+            reason: "Logical file name cannot be '.' or '..' directory reference".to_string(),
+        });
+    }
+
+    if trimmed.contains('\0') || trimmed.contains('\r') || trimmed.contains('\n') {
+        return Err(OosLiteError::InvalidName {
+            name: name.to_string(),
+            reason: "Logical file name cannot contain control characters".to_string(),
+        });
+    }
+
+    let path = Path::new(trimmed);
+    for comp in path.components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                return Err(OosLiteError::InvalidName {
+                    name: name.to_string(),
+                    reason: "Relative parent traversal '..' not allowed".to_string(),
+                });
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err(OosLiteError::InvalidName {
+                    name: name.to_string(),
+                    reason: "Absolute paths not allowed in logical name".to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let normal_count = path
+        .components()
+        .filter(|c| matches!(c, std::path::Component::Normal(_)))
+        .count();
+    if normal_count == 0 {
+        return Err(OosLiteError::InvalidName {
+            name: name.to_string(),
+            reason: "Logical file name must contain at least one valid path component".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Opens a file handle safely for reading and chunking.
+/// On Windows, opens with `FILE_SHARE_READ` (1) to prevent other processes
+/// from modifying or deleting the file during chunking, and to fail with
+/// `ERROR_SHARING_VIOLATION` (os error 32) if another process is actively writing.
+#[cfg(windows)]
+pub fn open_safe_read(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+pub fn open_safe_read(path: &Path) -> std::io::Result<File> {
+    File::open(path)
+}
+
 fn dir_size(path: &Path) -> u64 {
     let mut total = 0u64;
     if let Ok(entries) = fs::read_dir(path) {
@@ -71,20 +148,150 @@ pub struct StorageEngine {
     wal: Mutex<Wal>,
     op_lock: RwLock<()>,
     gc_lock: Mutex<()>,
+    put_lock: Mutex<()>,
+    _lock_file: File,
+    vault_key: Option<Arc<VaultKey>>,
 }
 
 impl StorageEngine {
+    /// Opens the store without a password.
+    /// Checks if a store directory contains existing storage data (segments, metadata, or WAL).
+    pub fn is_store_empty(root: &Path) -> Result<bool> {
+        if !root.exists() {
+            return Ok(true);
+        }
+
+        // Check segments directory
+        let seg_dir = root.join("segments");
+        if seg_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&seg_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str.starts_with("segment_") && name_str.ends_with(".seg") {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+
+        // Check metadata.db directory
+        let meta_dir = root.join("metadata.db");
+        if meta_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&meta_dir) {
+                let count = entries.flatten().count();
+                if count > 0 {
+                    return Ok(false);
+                }
+            }
+        }
+
+        // Check WAL
+        let wal_log = root.join("wal").join("wal.log");
+        if wal_log.exists() {
+            if let Ok(meta) = wal_log.metadata() {
+                if meta.len() > 0 {
+                    return Ok(false);
+                }
+            }
+        }
+
+        Ok(true)
+    }
+
+    /// Opens the store without a password.
+    /// If `<root_dir>/vault.key` exists, fails with `PasswordRequired`.
     pub fn open<P: AsRef<Path>>(root_dir: P) -> Result<Self> {
-        let root_dir = root_dir.as_ref().to_path_buf();
-        fs::create_dir_all(&root_dir)?;
+        let root = root_dir.as_ref();
+        if root.join("vault.key").exists() {
+            return Err(OosLiteError::PasswordRequired);
+        }
+        Self::open_internal(root, None)
+    }
 
-        let segments_dir = root_dir.join("segments");
-        let metadata_dir = root_dir.join("metadata.db");
-        let wal_dir = root_dir.join("wal");
+    /// Opens an encrypted store with a passphrase.
+    /// If `<root_dir>/vault.key` exists, unlocks the Master Key.
+    /// If `<root_dir>/vault.key` does not exist:
+    ///   - If the store already contains unencrypted data, returns an error prohibiting accidental hybrid stores.
+    ///   - If the store is empty, creates a new vault.key atomically and initializes the encrypted store.
+    pub fn open_with_password<P: AsRef<Path>>(root_dir: P, password: &str) -> Result<Self> {
+        let root = root_dir.as_ref();
+        let vault_path = root.join("vault.key");
+        let vk = if vault_path.exists() {
+            let bytes = fs::read(&vault_path)?;
+            VaultKey::unlock(password, &bytes)?
+        } else {
+            if !Self::is_store_empty(root)? {
+                return Err(OosLiteError::Internal(
+                    format!(
+                        "Cannot open existing unencrypted store at '{}' with --password: store already contains unencrypted data. Enabling encryption on an existing plaintext store without migration is prohibited.",
+                        root.display()
+                    )
+                ));
+            }
+            fs::create_dir_all(root)?;
+            let (vk, vault_bytes) = VaultKey::create(password)?;
+            crate::crypto::write_vault_file_atomic(&vault_path, &vault_bytes)?;
+            vk
+        };
+        Self::open_internal(root, Some(Arc::new(vk)))
+    }
 
-        let segment_store = SegmentStore::new(segments_dir)?;
+    /// Explicitly initializes a new encrypted store with a passphrase.
+    /// Fails if vault.key already exists or if store already contains unencrypted data.
+    pub fn init_encrypted<P: AsRef<Path>>(root_dir: P, password: &str) -> Result<Self> {
+        let root = root_dir.as_ref();
+        let vault_path = root.join("vault.key");
+        if vault_path.exists() {
+            return Err(OosLiteError::Internal(
+                "Encrypted store already initialized (vault.key already exists)".to_string(),
+            ));
+        }
+        if !Self::is_store_empty(root)? {
+            return Err(OosLiteError::Internal(
+                format!(
+                    "Cannot initialize encryption at '{}': store already contains existing unencrypted data.",
+                    root.display()
+                )
+            ));
+        }
+        fs::create_dir_all(root)?;
+        let (vk, vault_bytes) = VaultKey::create(password)?;
+        crate::crypto::write_vault_file_atomic(&vault_path, &vault_bytes)?;
+        Self::open_internal(root, Some(Arc::new(vk)))
+    }
+
+    /// Checks if this engine instance has encryption enabled.
+    pub fn is_encrypted(&self) -> bool {
+        self.vault_key.is_some()
+    }
+
+    fn open_internal(root_dir: &Path, vault_key: Option<Arc<VaultKey>>) -> Result<Self> {
+        let root_dir_buf = root_dir.to_path_buf();
+        fs::create_dir_all(&root_dir_buf)?;
+
+        // Exclusive file lock across processes
+        let lock_path = root_dir_buf.join("store.lock");
+        let lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&lock_path)?;
+
+        lock_file.try_lock_exclusive().map_err(|_| {
+            OosLiteError::StoreLocked(format!(
+                "Store at '{}' is already opened by another process (single-instance only)",
+                root_dir_buf.display()
+            ))
+        })?;
+
+        let segments_dir = root_dir_buf.join("segments");
+        let metadata_dir = root_dir_buf.join("metadata.db");
+        let wal_dir = root_dir_buf.join("wal");
+
+        let segment_store = SegmentStore::with_vault(segments_dir, vault_key.clone())?;
         let metadata_store = MetadataStore::open(metadata_dir)?;
-        let mut wal = Wal::open(wal_dir)?;
+        let mut wal = Wal::open_with_vault(wal_dir, vault_key.clone())?;
 
         // WAL REDO Recovery on startup
         let uncheckpointed = wal.read_uncheckpointed_records()?;
@@ -143,12 +350,15 @@ impl StorageEngine {
         }
 
         Ok(Self {
-            root_dir,
+            root_dir: root_dir_buf,
             segment_store,
             metadata_store,
             wal: Mutex::new(wal),
             op_lock: RwLock::new(()),
             gc_lock: Mutex::new(()),
+            put_lock: Mutex::new(()),
+            _lock_file: lock_file,
+            vault_key,
         })
     }
 
@@ -156,11 +366,17 @@ impl StorageEngine {
         &self.root_dir
     }
 
+    pub fn vault_key(&self) -> Option<&Arc<VaultKey>> {
+        self.vault_key.as_ref()
+    }
+
     pub fn metadata_store(&self) -> &MetadataStore {
         &self.metadata_store
     }
 
-
+    pub fn op_lock(&self) -> &RwLock<()> {
+        &self.op_lock
+    }
 
     /// Stores a file with an associated logical name (e.g. "a.txt" or "docs/photo.jpg").
     /// If the name already exists, creates a new version of the existing ObjectID.
@@ -174,6 +390,9 @@ impl StorageEngine {
     }
 
     pub fn put_file_named<P: AsRef<Path>>(&self, name: &str, file_path: P) -> Result<PutSummary> {
+        let name = name.trim();
+        validate_logical_name(name)?;
+
         let file_path = file_path.as_ref();
         if !file_path.exists() {
             return Err(OosLiteError::Io(std::io::Error::new(
@@ -182,12 +401,17 @@ impl StorageEngine {
             )));
         }
 
-        // Prevent race condition with concurrent GC
+        // 1. Single-writer synchronization to prevent version race condition
+        let _put_guard = self.put_lock.lock().map_err(|e| {
+            OosLiteError::Internal(format!("StorageEngine put_lock poisoned: {e}"))
+        })?;
+
+        // 2. Prevent race condition with concurrent GC
         let _op_guard = self.op_lock.read().map_err(|e| {
             OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
         })?;
 
-        let file = File::open(file_path)?;
+        let file = open_safe_read(file_path)?;
         let reader = BufReader::new(file);
         let mut stream_chunker = StreamChunker::new(reader);
 
@@ -408,6 +632,10 @@ impl StorageEngine {
         version: Option<u32>,
         out_path: P,
     ) -> Result<u64> {
+        let _op_guard = self.op_lock.read().map_err(|e| {
+            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
+        })?;
+
         let manifest = if let Some(v) = version {
             let obj_id = if let Some(id) = self.metadata_store.resolve_name(target)? {
                 id
@@ -469,7 +697,7 @@ impl StorageEngine {
     /// Creates an O(1) point-in-time snapshot of the entire name index namespace.
     /// Does NOT copy any physical chunks (zero-copy / reference-only).
     pub fn create_snapshot(&self, label: &str) -> Result<Snapshot> {
-        let _op_guard = self.op_lock.read().map_err(|e| {
+        let _op_guard = self.op_lock.write().map_err(|e| {
             OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
         })?;
 
@@ -533,6 +761,12 @@ impl StorageEngine {
         })?;
 
         let target_dir = target_dir.as_ref();
+        if target_dir.as_os_str().is_empty() {
+            return Err(OosLiteError::InvalidName {
+                name: label.to_string(),
+                reason: "Target directory for snapshot restore cannot be empty".to_string(),
+            });
+        }
         fs::create_dir_all(target_dir)?;
 
         for entry in &snapshot.entries {
@@ -554,6 +788,13 @@ impl StorageEngine {
                     _ => None,
                 })
                 .collect::<PathBuf>();
+
+            if safe_relative_path.as_os_str().is_empty() {
+                return Err(OosLiteError::InvalidName {
+                    name: entry.name.clone(),
+                    reason: "Snapshot entry resolved to empty relative path".to_string(),
+                });
+            }
 
             let out_path = target_dir.join(safe_relative_path);
             self.extract_manifest_to_file(&manifest, &out_path)?;
@@ -664,8 +905,7 @@ impl StorageEngine {
         })?;
 
         let name = name.trim();
-        if let Some(object_id) = self.metadata_store.unbind_name(name)? {
-            let _ = self.metadata_store.delete_object(&object_id);
+        if let Some(object_id) = self.metadata_store.delete_named_object(name)? {
             self.metadata_store.flush()?;
             info!(name = %name, object_id = %object_id, "Successfully unlinked file");
             Ok(true)
@@ -701,6 +941,80 @@ impl StorageEngine {
         })?;
 
         GarbageCollector::collect(&self.segment_store, &self.metadata_store)
+    }
+
+    /// Renames a logical file binding, preserving the underlying ObjectId and its full version history.
+    pub fn rename_file(&self, old_name: &str, new_name: &str) -> Result<bool> {
+        let old_name = old_name.trim();
+        let new_name = new_name.trim();
+        validate_logical_name(new_name)?;
+
+        let _put_guard = self.put_lock.lock().map_err(|e| {
+            OosLiteError::Internal(format!("StorageEngine put_lock poisoned: {e}"))
+        })?;
+        let _op_guard = self.op_lock.read().map_err(|e| {
+            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
+        })?;
+
+        let renamed = self.metadata_store.rename_name_binding(old_name, new_name)?;
+        if renamed {
+            self.metadata_store.flush()?;
+            info!(
+                old_name = %old_name,
+                new_name = %new_name,
+                "Renamed logical file binding preserving version history"
+            );
+        }
+        Ok(renamed)
+    }
+
+    /// Prunes older historical versions of a file, keeping only the latest `keep_last_n` versions.
+    /// Orphaned chunks will be reclaimed during the next Garbage Collection (`gc()`).
+    pub fn prune_file_versions(&self, name: &str, keep_last_n: usize) -> Result<usize> {
+        let name = name.trim();
+        let _put_guard = self.put_lock.lock().map_err(|e| {
+            OosLiteError::Internal(format!("StorageEngine put_lock poisoned: {e}"))
+        })?;
+        let _op_guard = self.op_lock.read().map_err(|e| {
+            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
+        })?;
+
+        let obj_id = match self.metadata_store.resolve_name(name)? {
+            Some(id) => id,
+            None => return Ok(0),
+        };
+
+        let mut record = match self.metadata_store.get_object(&obj_id)? {
+            Some(rec) => rec,
+            None => return Ok(0),
+        };
+
+        if record.versions.len() <= keep_last_n {
+            return Ok(0);
+        }
+
+        let total_versions = record.versions.len();
+        let prune_count = total_versions.saturating_sub(keep_last_n);
+        record.versions.drain(0..prune_count);
+        self.metadata_store.put_object(&record)?;
+        self.metadata_store.flush()?;
+        info!(
+            name = %name,
+            pruned = prune_count,
+            remaining = record.versions.len(),
+            "Pruned historical versions"
+        );
+        Ok(prune_count)
+    }
+
+    /// Prunes older historical versions across all files in the store, keeping at most `keep_last_n` versions per file.
+    pub fn prune_all(&self, keep_last_n: usize) -> Result<usize> {
+        let files = self.list_files()?;
+        let mut total_pruned = 0;
+        for (name, _, _) in files {
+            total_pruned += self.prune_file_versions(&name, keep_last_n)?;
+        }
+        Ok(total_pruned)
     }
 
     pub fn segment_store(&self) -> &SegmentStore {

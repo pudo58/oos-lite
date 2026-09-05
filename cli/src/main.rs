@@ -6,19 +6,39 @@ use oos_lite_core::StorageEngine;
 
 mod ui;
 mod mount;
+mod tray;
 
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(name = "oos-lite", author, version, about = "OOS-Lite Content-Addressed File Storage CLI", long_about = None)]
 struct Cli {
     #[arg(short, long, alias = "store", help = "Store directory path", default_value = ".oos-store")]
     store_dir: PathBuf,
 
+    #[arg(long, help = "Encryption passphrase for store (or set OOS_PASSWORD env var)")]
+    password: Option<String>,
+
+    #[arg(long, help = "Path to file containing encryption passphrase")]
+    password_file: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
 }
 
+impl std::fmt::Debug for Cli {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cli")
+            .field("store_dir", &self.store_dir)
+            .field("password", &self.password.as_ref().map(|_| "***REDACTED***"))
+            .field("password_file", &self.password_file)
+            .field("command", &self.command)
+            .finish()
+    }
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
+    #[command(about = "Initialize a new store (optionally encrypted with --password or --password-file)")]
+    Init,
     #[command(about = "Put a file into the store")]
     Put {
         #[arg(help = "Path to the file to store")]
@@ -84,6 +104,24 @@ enum Commands {
         )]
         cache_mb: usize,
     },
+    #[command(about = "Watch a directory and automatically version modified files (Auto-Vault)")]
+    Watch {
+        #[arg(help = "Directory path to watch")]
+        dir: PathBuf,
+        #[arg(long, help = "Debounce duration in seconds before commit", default_value_t = 3)]
+        debounce_secs: u64,
+        #[arg(long, help = "Cooldown window in seconds between versions of the same file", default_value_t = 60)]
+        cooldown_secs: u64,
+        #[arg(long, help = "I/O throttle sleep in ms per file during cold-start scan", default_value_t = 10)]
+        throttle_ms: u64,
+    },
+    #[command(about = "Prune historical versions of stored files")]
+    Prune {
+        #[arg(short, long, help = "Number of latest versions to keep", default_value_t = 10)]
+        keep: usize,
+        #[arg(help = "Optional specific file name to prune (defaults to all files)")]
+        name: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -109,12 +147,52 @@ enum SnapshotCommands {
     },
 }
 
+fn resolve_password(cli: &Cli) -> anyhow::Result<Option<String>> {
+    if let Some(ref p) = cli.password {
+        return Ok(Some(p.clone()));
+    }
+    if let Some(ref path) = cli.password_file {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("Failed to read password file '{}': {}", path.display(), e))?;
+        let trimmed = content.trim_end_matches(&['\r', '\n'][..]).to_string();
+        return Ok(Some(trimmed));
+    }
+    if let Ok(p) = std::env::var("OOS_PASSWORD") {
+        return Ok(Some(p));
+    }
+    Ok(None)
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
     info!("OOS-Lite CLI initialized with store at: {}", cli.store_dir.display());
 
-    let engine = Arc::new(StorageEngine::open(&cli.store_dir)?);
+    let password = resolve_password(&cli)?;
+
+    if let Commands::Init = cli.command {
+        if let Some(ref pwd) = password {
+            StorageEngine::init_encrypted(&cli.store_dir, pwd)?;
+            println!("✓ Initialized encrypted OOS-Lite store at {}", cli.store_dir.display());
+        } else {
+            StorageEngine::open(&cli.store_dir)?;
+            println!("✓ Initialized unencrypted OOS-Lite store at {}", cli.store_dir.display());
+        }
+        return Ok(());
+    }
+
+    let engine = if let Some(ref pwd) = password {
+        Arc::new(StorageEngine::open_with_password(&cli.store_dir, pwd)?)
+    } else {
+        match StorageEngine::open(&cli.store_dir) {
+            Ok(eng) => Arc::new(eng),
+            Err(oos_lite_core::error::OosLiteError::PasswordRequired) => {
+                eprintln!("Error: This store is encrypted. Please provide --password, --password-file, or set the OOS_PASSWORD environment variable.");
+                std::process::exit(1);
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
 
     match cli.command {
         Commands::Put { path, name } => {
@@ -263,6 +341,8 @@ fn main() -> anyhow::Result<()> {
             println!("============================================================");
         }
         Commands::App => {
+            #[cfg(windows)]
+            tray::windows::spawn_system_tray();
             ui::start_ui_server(engine, "127.0.0.1", 3000, false, true)?;
         }
         Commands::Ui { host, port, no_open } => {
@@ -271,6 +351,60 @@ fn main() -> anyhow::Result<()> {
         Commands::Mount { target, webdav, port, cache_mb } => {
             mount::mount(engine, target.as_deref(), webdav, port, cache_mb)?;
         }
+        Commands::Watch {
+            dir,
+            debounce_secs,
+            cooldown_secs,
+            throttle_ms,
+        } => {
+            use std::time::Duration;
+            use oos_lite_core::watcher::{WatcherConfig, WatcherService};
+
+            let config = WatcherConfig::new(&dir)
+                .with_debounce(Duration::from_secs(debounce_secs))
+                .with_cooldown(Duration::from_secs(cooldown_secs))
+                .with_throttle_ms(throttle_ms);
+
+            println!("============================================================");
+            println!("            OOS-LITE AUTO-VAULT DIRECTORY WATCHER           ");
+            println!("============================================================");
+            println!("  Watched Directory  : {}", dir.display());
+            println!("  Store Directory    : {}", cli.store_dir.display());
+            println!("  Debounce Window    : {}s", debounce_secs);
+            println!("  Cooldown Window    : {}s", cooldown_secs);
+            println!("  Cold-Start Throttle: {}ms/file", throttle_ms);
+            println!("============================================================");
+            println!("==> Watching for file changes. Press Ctrl+C to stop...");
+
+            let service = WatcherService::new(Arc::clone(&engine), config);
+            let handle = service.start()?;
+
+            let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let r_ctrlc = Arc::clone(&running);
+            ctrlc::set_handler(move || {
+                println!("\n==> Stopping directory watcher...");
+                r_ctrlc.store(false, std::sync::atomic::Ordering::SeqCst);
+            })
+            .ok();
+
+            while running.load(std::sync::atomic::Ordering::SeqCst) && handle.is_running() {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+
+            handle.stop();
+            println!("✓ Auto-Vault watcher stopped cleanly.");
+        }
+        Commands::Prune { keep, name } => {
+            if let Some(target) = name {
+                let pruned = engine.prune_file_versions(&target, keep)?;
+                println!("✓ Pruned {} older version(s) for '{}' (keeping latest {})", pruned, target, keep);
+            } else {
+                let pruned = engine.prune_all(keep)?;
+                println!("✓ Pruned {} older version(s) across all files (keeping latest {} per file)", pruned, keep);
+            }
+            println!("  Run 'oos-lite gc' to reclaim disk space from pruned versions.");
+        }
+        Commands::Init => unreachable!(),
     }
 
     Ok(())

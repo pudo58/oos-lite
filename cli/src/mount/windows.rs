@@ -1,7 +1,12 @@
+use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{info, warn};
+
+/// CREATE_NO_WINDOW — prevents a console window from flashing when spawning
+/// child processes from a GUI (windows_subsystem = "windows") application.
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WebClientStatus {
@@ -27,7 +32,11 @@ pub fn run_preflight_check() -> WindowsPreflightReport {
 }
 
 fn check_webclient_service() -> WebClientStatus {
-    let output = match Command::new("sc.exe").args(["query", "WebClient"]).output() {
+    let output = match Command::new("sc.exe")
+        .args(["query", "WebClient"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
         Ok(out) => out,
         Err(_) => return WebClientStatus::Unknown("Failed to execute sc.exe".to_string()),
     };
@@ -59,6 +68,7 @@ fn query_file_size_limit_registry() -> Option<u64> {
             "/v",
             "FileSizeLimitInBytes",
         ])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()?;
 
@@ -84,7 +94,11 @@ fn query_file_size_limit_registry() -> Option<u64> {
 
 pub fn is_drive_mapped(drive_letter: char) -> bool {
     let drive_str = format!("{}:", drive_letter.to_ascii_uppercase());
-    if let Ok(output) = Command::new("net.exe").args(["use"]).output() {
+    if let Ok(output) = Command::new("net.exe")
+        .args(["use"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
         let text = String::from_utf8_lossy(&output.stdout);
         return text.contains(&drive_str);
     }
@@ -106,6 +120,7 @@ pub fn map_drive(drive_letter: char, port: u16) -> anyhow::Result<()> {
 
     let output = Command::new("net.exe")
         .args(["use", &drive_str, &unc_path, "/persistent:no"])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()?;
 
     if !output.status.success() {
@@ -120,7 +135,7 @@ pub fn map_drive(drive_letter: char, port: u16) -> anyhow::Result<()> {
         );
     }
 
-    println!("==> Successfully mapped OOS-Lite WebDAV drive to {}", drive_str);
+    info!("Successfully mapped OOS-Lite WebDAV drive to {}", drive_str);
     Ok(())
 }
 
@@ -130,13 +145,14 @@ pub fn unmap_drive(drive_letter: char) -> anyhow::Result<()> {
 
     let output = Command::new("net.exe")
         .args(["use", &drive_str, "/delete", "/y"])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()?;
 
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
         warn!("Failed to cleanly unmap drive {}: {}", drive_str, err.trim());
     } else {
-        println!("==> Cleanly unmapped drive {}", drive_str);
+        info!("Cleanly unmapped drive {}", drive_str);
     }
 
     Ok(())
@@ -144,9 +160,7 @@ pub fn unmap_drive(drive_letter: char) -> anyhow::Result<()> {
 
 pub fn setup_ctrlc_cleanup(drive_letter: Option<char>, running: Arc<AtomicBool>) -> anyhow::Result<()> {
     ctrlc::set_handler(move || {
-        println!("\n[!] Received Ctrl+C / Termination signal. Shutting down...");
         if let Some(c) = drive_letter {
-            println!("    Cleaning up network drive {}:...", c.to_ascii_uppercase());
             let _ = unmap_drive(c);
         }
         running.store(false, Ordering::SeqCst);

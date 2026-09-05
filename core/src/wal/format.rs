@@ -13,6 +13,7 @@ pub const WAL_HEADER_SIZE: usize = 4 + 8 + 1 + 4 + 4; // 21 bytes
 pub enum WalRecordType {
     PutObject = 1,
     Checkpoint = 2,
+    EncryptedPutObject = 3,
 }
 
 impl TryFrom<u8> for WalRecordType {
@@ -22,6 +23,7 @@ impl TryFrom<u8> for WalRecordType {
         match val {
             1 => Ok(Self::PutObject),
             2 => Ok(Self::Checkpoint),
+            3 => Ok(Self::EncryptedPutObject),
             _ => Err(OosLiteError::WalRecovery(format!(
                 "Unknown WAL record type: {val}"
             ))),
@@ -72,9 +74,13 @@ impl WalRecord {
         }
     }
 
-    pub fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        self.encode_with_vault(None)
+    }
+
+    pub fn encode_with_vault(&self, vault_key: Option<&crate::crypto::VaultKey>) -> Result<Vec<u8>> {
         let mut payload_buf = Vec::new();
-        match &self.payload {
+        let record_type = match &self.payload {
             WalRecordPayload::PutObject(put) => {
                 let name_bytes = put.name.as_bytes();
                 payload_buf.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
@@ -93,27 +99,57 @@ impl WalRecord {
                     payload_buf.extend_from_slice(&(chunk_data.len() as u32).to_le_bytes());
                     payload_buf.extend_from_slice(chunk_data);
                 }
+
+                if vault_key.is_some() {
+                    WalRecordType::EncryptedPutObject
+                } else {
+                    WalRecordType::PutObject
+                }
             }
             WalRecordPayload::Checkpoint(lsn) => {
                 payload_buf.extend_from_slice(&lsn.to_le_bytes());
+                WalRecordType::Checkpoint
             }
-        }
+        };
 
-        let payload_len = payload_buf.len() as u32;
-        let crc = crc32fast::hash(&payload_buf);
+        let final_payload = if record_type == WalRecordType::EncryptedPutObject {
+            let vk = vault_key.ok_or_else(|| OosLiteError::PasswordRequired)?;
+            let mut nonce = [0u8; 24];
+            rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut nonce);
 
-        let mut record_buf = Vec::with_capacity(WAL_HEADER_SIZE + payload_buf.len());
+            let mut aad = [0u8; 9];
+            aad[0..8].copy_from_slice(&self.lsn.to_le_bytes());
+            aad[8] = record_type as u8;
+
+            let ciphertext = vk.encrypt_chunk(&payload_buf, &nonce, &aad)?;
+
+            let mut out = Vec::with_capacity(24 + ciphertext.len());
+            out.extend_from_slice(&nonce);
+            out.extend_from_slice(&ciphertext);
+            out
+        } else {
+            payload_buf
+        };
+
+        let payload_len = final_payload.len() as u32;
+        let crc = crc32fast::hash(&final_payload);
+
+        let mut record_buf = Vec::with_capacity(WAL_HEADER_SIZE + final_payload.len());
         record_buf.extend_from_slice(&WAL_MAGIC);
         record_buf.extend_from_slice(&self.lsn.to_le_bytes());
-        record_buf.push(self.record_type() as u8);
+        record_buf.push(record_type as u8);
         record_buf.extend_from_slice(&payload_len.to_le_bytes());
         record_buf.extend_from_slice(&crc.to_le_bytes());
-        record_buf.extend_from_slice(&payload_buf);
+        record_buf.extend_from_slice(&final_payload);
 
-        record_buf
+        Ok(record_buf)
     }
 
     pub fn decode(buf: &[u8]) -> Result<(Self, usize)> {
+        Self::decode_with_vault(buf, None)
+    }
+
+    pub fn decode_with_vault(buf: &[u8], vault_key: Option<&crate::crypto::VaultKey>) -> Result<(Self, usize)> {
         if buf.len() < WAL_HEADER_SIZE {
             return Err(OosLiteError::WalRecovery(
                 "Buffer too short for WAL header".into(),
@@ -148,9 +184,32 @@ impl WalRecord {
             });
         }
 
-        let mut cursor = Cursor::new(payload_slice);
+        let decrypted_bytes: Vec<u8>;
+        let plaintext_slice: &[u8] = match record_type {
+            WalRecordType::EncryptedPutObject => {
+                let vk = vault_key.ok_or_else(|| OosLiteError::PasswordRequired)?;
+                if payload_slice.len() < 24 + 16 {
+                    return Err(OosLiteError::WalRecovery(
+                        "Encrypted WAL payload too short".into(),
+                    ));
+                }
+                let mut nonce = [0u8; 24];
+                nonce.copy_from_slice(&payload_slice[0..24]);
+                let ciphertext = &payload_slice[24..];
+
+                let mut aad = [0u8; 9];
+                aad[0..8].copy_from_slice(&lsn.to_le_bytes());
+                aad[8] = record_type as u8;
+
+                decrypted_bytes = vk.decrypt_chunk(ciphertext, &nonce, &aad)?;
+                &decrypted_bytes
+            }
+            WalRecordType::PutObject | WalRecordType::Checkpoint => payload_slice,
+        };
+
+        let mut cursor = Cursor::new(plaintext_slice);
         let payload = match record_type {
-            WalRecordType::PutObject => {
+            WalRecordType::PutObject | WalRecordType::EncryptedPutObject => {
                 let mut name_len_buf = [0u8; 2];
                 cursor.read_exact(&mut name_len_buf)?;
                 let name_len = u16::from_le_bytes(name_len_buf) as usize;

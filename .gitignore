@@ -2,6 +2,7 @@
 # Rust Build Artifacts
 # ==============================================================================
 /target/
+/dist/
 **/*.rs.bk
 *.pdb
 Cargo.lock.bak

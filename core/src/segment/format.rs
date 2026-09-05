@@ -3,11 +3,15 @@ use crate::chunk::ChunkId;
 use crate::error::{OosLiteError, Result};
 
 pub const SEGMENT_MAGIC: &[u8; 4] = b"OOSS";
-pub const SEGMENT_VERSION: u32 = 2;
+pub const SEGMENT_VERSION: u32 = 3;
 pub const SEGMENT_HEADER_SIZE: usize = 32;
 
-pub const RECORD_MAGIC: &[u8; 4] = b"OOSR";
-pub const RECORD_HEADER_SIZE: usize = 4 + 32 + 1 + 3 + 4 + 4 + 4 + 4; // 56 bytes
+pub const RECORD_MAGIC_V2: &[u8; 4] = b"OOSR";
+pub const RECORD_MAGIC_V3: &[u8; 4] = b"OSR3";
+pub const RECORD_MAGIC: &[u8; 4] = RECORD_MAGIC_V3;
+pub const RECORD_HEADER_SIZE_V2: usize = 56;
+pub const RECORD_HEADER_SIZE_V3: usize = 80;
+pub const RECORD_HEADER_SIZE: usize = RECORD_HEADER_SIZE_V3; // 80 bytes
 
 pub const DEFAULT_MAX_SEGMENT_SIZE: u64 = 256 * 1024 * 1024; // 256 MiB
 
@@ -26,6 +30,26 @@ impl CompressionCodec {
             other => Err(OosLiteError::CorruptedSegment {
                 offset: 0,
                 reason: format!("Unknown compression codec: 0x{:02x}", other),
+            }),
+        }
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncryptionScheme {
+    None = 0x00,
+    XChaCha20Poly1305 = 0x01,
+}
+
+impl EncryptionScheme {
+    pub fn from_u8(val: u8) -> Result<Self> {
+        match val {
+            0x00 => Ok(Self::None),
+            0x01 => Ok(Self::XChaCha20Poly1305),
+            other => Err(OosLiteError::CorruptedSegment {
+                offset: 0,
+                reason: format!("Unknown encryption scheme: 0x{:02x}", other),
             }),
         }
     }
@@ -67,7 +91,7 @@ impl SegmentHeader {
             });
         }
         let version = u32::from_le_bytes(buf[4..8].try_into().unwrap());
-        if version != SEGMENT_VERSION && version != 1 {
+        if version != SEGMENT_VERSION && version != 2 && version != 1 {
             return Err(OosLiteError::CorruptedSegment {
                 offset: 4,
                 reason: format!("Unsupported segment version: {}", version),
@@ -79,109 +103,199 @@ impl SegmentHeader {
     }
 }
 
-/// Chunk Record Layout in Segment (v2, 56 bytes header):
+/// Chunk Record Layout in Segment (v3, 80 bytes header):
 /// [0..4]   : Record Magic "OOSR"
 /// [4..36]  : ChunkId BLAKE3 (32 bytes)
 /// [36]     : Compression Codec (1 byte: 0x00 = None, 0x01 = Zstd)
-/// [37..40] : Reserved padding (3 bytes, [0, 0, 0])
+/// [37]     : Encryption Scheme (1 byte: 0x00 = None, 0x01 = XChaCha20-Poly1305)
+/// [38..40] : Reserved padding (2 bytes, [0, 0])
 /// [40..44] : Raw uncompressed data length (4 bytes, u32-le)
 /// [44..48] : Stored payload length on disk (4 bytes, u32-le)
 /// [48..52] : Stored payload CRC32C checksum (4 bytes, u32-le)
-/// [52..56] : Header Checksum = CRC32C([0..52]) (4 bytes, u32-le)
-/// [56..56+payload_len]: Physical Data Payload
+/// [52..76] : Nonce (24 bytes, [u8; 24])
+/// [76..80] : Header Checksum = CRC32C([0..76]) (4 bytes, u32-le)
+/// [80..80+payload_len]: Physical Data Payload
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecordHeader {
     pub chunk_id: ChunkId,
     pub compression_codec: CompressionCodec,
+    pub encryption_scheme: EncryptionScheme,
     pub raw_len: u32,
     pub payload_len: u32,
     pub payload_crc: u32,
+    pub nonce: [u8; 24],
+    pub header_size: usize,
 }
 
 impl RecordHeader {
     pub fn new(
         chunk_id: ChunkId,
         compression_codec: CompressionCodec,
+        encryption_scheme: EncryptionScheme,
         raw_len: u32,
         stored_payload: &[u8],
+        nonce: [u8; 24],
     ) -> Self {
         let payload_crc = crc32fast::hash(stored_payload);
         let payload_len = stored_payload.len() as u32;
         Self {
             chunk_id,
             compression_codec,
+            encryption_scheme,
             raw_len,
             payload_len,
             payload_crc,
+            nonce,
+            header_size: RECORD_HEADER_SIZE_V3,
         }
     }
 
+    /// Associated Authenticated Data (AAD) for AEAD (42 bytes)
+    pub fn aad(&self) -> [u8; 42] {
+        let mut aad = [0u8; 42];
+        aad[0..32].copy_from_slice(self.chunk_id.as_bytes());
+        aad[32] = self.compression_codec as u8;
+        aad[33] = self.encryption_scheme as u8;
+        aad[34..38].copy_from_slice(&self.raw_len.to_le_bytes());
+        aad[38..42].copy_from_slice(&self.payload_len.to_le_bytes());
+        aad
+    }
+
     pub fn write_to<W: Write>(&self, w: &mut W) -> Result<()> {
-        let mut buf = [0u8; RECORD_HEADER_SIZE];
-        buf[0..4].copy_from_slice(RECORD_MAGIC);
+        let mut buf = [0u8; RECORD_HEADER_SIZE_V3];
+        buf[0..4].copy_from_slice(RECORD_MAGIC_V3);
         buf[4..36].copy_from_slice(self.chunk_id.as_bytes());
         buf[36] = self.compression_codec as u8;
-        buf[37..40].copy_from_slice(&[0, 0, 0]);
+        buf[37] = self.encryption_scheme as u8;
+        buf[38..40].copy_from_slice(&[0, 0]);
         buf[40..44].copy_from_slice(&self.raw_len.to_le_bytes());
         buf[44..48].copy_from_slice(&self.payload_len.to_le_bytes());
         buf[48..52].copy_from_slice(&self.payload_crc.to_le_bytes());
+        buf[52..76].copy_from_slice(&self.nonce);
 
-        let header_crc = crc32fast::hash(&buf[0..52]);
-        buf[52..56].copy_from_slice(&header_crc.to_le_bytes());
+        let header_crc = crc32fast::hash(&buf[0..76]);
+        buf[76..80].copy_from_slice(&header_crc.to_le_bytes());
 
         w.write_all(&buf)?;
         Ok(())
     }
 
     pub fn read_from<R: Read>(r: &mut R) -> std::io::Result<Option<Self>> {
-        let mut buf = [0u8; RECORD_HEADER_SIZE];
-        match r.read_exact(&mut buf) {
+        let mut magic = [0u8; 4];
+        match r.read_exact(&mut magic) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
             Err(e) => return Err(e),
         }
 
-        if &buf[0..4] != RECORD_MAGIC {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid record magic",
-            ));
-        }
+        if &magic == RECORD_MAGIC_V3 {
+            // v3 record: 80 bytes total (4 magic + 76 remaining)
+            let mut buf = [0u8; RECORD_HEADER_SIZE_V3];
+            buf[0..4].copy_from_slice(&magic);
+            r.read_exact(&mut buf[4..80])?;
 
-        let expected_header_crc = crc32fast::hash(&buf[0..52]);
-        let stored_header_crc = u32::from_le_bytes(buf[52..56].try_into().unwrap());
-        if expected_header_crc != stored_header_crc {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Record header checksum mismatch (partial write)",
-            ));
-        }
-
-        let mut id_bytes = [0u8; 32];
-        id_bytes.copy_from_slice(&buf[4..36]);
-        let chunk_id = ChunkId::from_raw(id_bytes);
-        let codec_u8 = buf[36];
-        let compression_codec = match codec_u8 {
-            0x00 => CompressionCodec::None,
-            0x01 => CompressionCodec::Zstd,
-            other => {
+            let expected_crc = crc32fast::hash(&buf[0..76]);
+            let stored_crc = u32::from_le_bytes(buf[76..80].try_into().unwrap());
+            if expected_crc != stored_crc {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("Unsupported compression codec 0x{:02x}", other),
-                ))
+                    "Record header checksum mismatch (partial write or corrupted record)",
+                ));
             }
-        };
-        let raw_len = u32::from_le_bytes(buf[40..44].try_into().unwrap());
-        let payload_len = u32::from_le_bytes(buf[44..48].try_into().unwrap());
-        let payload_crc = u32::from_le_bytes(buf[48..52].try_into().unwrap());
 
-        Ok(Some(Self {
-            chunk_id,
-            compression_codec,
-            raw_len,
-            payload_len,
-            payload_crc,
-        }))
+            let mut id_bytes = [0u8; 32];
+            id_bytes.copy_from_slice(&buf[4..36]);
+            let chunk_id = ChunkId::from_raw(id_bytes);
+
+            let compression_codec = match buf[36] {
+                0x00 => CompressionCodec::None,
+                0x01 => CompressionCodec::Zstd,
+                other => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Unsupported compression codec 0x{:02x}", other),
+                    ))
+                }
+            };
+
+            let encryption_scheme = match buf[37] {
+                0x00 => EncryptionScheme::None,
+                0x01 => EncryptionScheme::XChaCha20Poly1305,
+                other => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Unsupported encryption scheme 0x{:02x}", other),
+                    ))
+                }
+            };
+
+            let raw_len = u32::from_le_bytes(buf[40..44].try_into().unwrap());
+            let payload_len = u32::from_le_bytes(buf[44..48].try_into().unwrap());
+            let payload_crc = u32::from_le_bytes(buf[48..52].try_into().unwrap());
+
+            let mut nonce = [0u8; 24];
+            nonce.copy_from_slice(&buf[52..76]);
+
+            Ok(Some(Self {
+                chunk_id,
+                compression_codec,
+                encryption_scheme,
+                raw_len,
+                payload_len,
+                payload_crc,
+                nonce,
+                header_size: RECORD_HEADER_SIZE_V3,
+            }))
+        } else if &magic == RECORD_MAGIC_V2 {
+            // Legacy v2 record: 56 bytes total (4 magic + 52 remaining)
+            let mut buf = [0u8; RECORD_HEADER_SIZE_V2];
+            buf[0..4].copy_from_slice(&magic);
+            r.read_exact(&mut buf[4..56])?;
+
+            let expected_crc = crc32fast::hash(&buf[0..52]);
+            let stored_crc = u32::from_le_bytes(buf[52..56].try_into().unwrap());
+            if expected_crc != stored_crc {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Legacy v2 record header checksum mismatch",
+                ));
+            }
+
+            let mut id_bytes = [0u8; 32];
+            id_bytes.copy_from_slice(&buf[4..36]);
+            let chunk_id = ChunkId::from_raw(id_bytes);
+
+            let compression_codec = match buf[36] {
+                0x00 => CompressionCodec::None,
+                0x01 => CompressionCodec::Zstd,
+                other => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Unsupported compression codec 0x{:02x}", other),
+                    ))
+                }
+            };
+
+            let raw_len = u32::from_le_bytes(buf[40..44].try_into().unwrap());
+            let payload_len = u32::from_le_bytes(buf[44..48].try_into().unwrap());
+            let payload_crc = u32::from_le_bytes(buf[48..52].try_into().unwrap());
+
+            Ok(Some(Self {
+                chunk_id,
+                compression_codec,
+                encryption_scheme: EncryptionScheme::None,
+                raw_len,
+                payload_len,
+                payload_crc,
+                nonce: [0u8; 24],
+                header_size: RECORD_HEADER_SIZE_V2,
+            }))
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Invalid record magic: {:?}", magic),
+            ))
+        }
     }
 }
 

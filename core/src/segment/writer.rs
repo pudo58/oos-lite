@@ -1,13 +1,16 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use rand_core::RngCore;
 use tracing::{debug, info};
 
 use crate::chunk::ChunkId;
+use crate::crypto::VaultKey;
 use crate::error::Result;
 use super::format::{
-    ChunkLocation, CompressionCodec, RecordHeader, SegmentHeader, DEFAULT_MAX_SEGMENT_SIZE,
-    RECORD_HEADER_SIZE, SEGMENT_HEADER_SIZE,
+    ChunkLocation, CompressionCodec, EncryptionScheme, RecordHeader, SegmentHeader,
+    DEFAULT_MAX_SEGMENT_SIZE, RECORD_HEADER_SIZE_V3, SEGMENT_HEADER_SIZE,
 };
 use super::index::SegmentIndex;
 
@@ -21,6 +24,7 @@ pub struct SegmentWriter {
     current_file: Option<BufWriter<File>>,
     current_offset: u64,
     max_segment_size: u64,
+    vault_key: Option<Arc<VaultKey>>,
 }
 
 impl SegmentWriter {
@@ -29,6 +33,7 @@ impl SegmentWriter {
         segment_id: u64,
         resume_offset: u64,
         max_segment_size: u64,
+        vault_key: Option<Arc<VaultKey>>,
     ) -> Result<Self> {
         let path = segments_dir.join(segment_file_name(segment_id));
         let mut file = OpenOptions::new()
@@ -58,6 +63,7 @@ impl SegmentWriter {
             } else {
                 max_segment_size
             },
+            vault_key,
         })
     }
 
@@ -75,7 +81,7 @@ impl SegmentWriter {
 
     /// Appends a chunk to the active segment.
     /// Deduplication identity (chunk_id) was already computed on raw data via BLAKE3.
-    /// Evaluates conditional compression (Zstandard level 3): stores compressed if savings >= 5%.
+    /// Pipeline: Plaintext -> BLAKE3 -> Zstd (conditional) -> XChaCha20-Poly1305 (if vaulted) -> CRC32C
     pub fn append_chunk(
         &mut self,
         chunk_id: ChunkId,
@@ -83,35 +89,63 @@ impl SegmentWriter {
         index: &SegmentIndex,
     ) -> Result<ChunkLocation> {
         let compressed = zstd::encode_all(data, 3);
-        let (payload_bytes, codec): (&[u8], CompressionCodec) = match &compressed {
+        let (compressed_bytes, codec): (&[u8], CompressionCodec) = match &compressed {
             Ok(comp) if (comp.len() as u64) < (data.len() as u64 * 95 / 100) => {
                 (comp.as_slice(), CompressionCodec::Zstd)
             }
             _ => (data, CompressionCodec::None),
         };
 
-        let record_size = (RECORD_HEADER_SIZE + payload_bytes.len()) as u64;
+        let (final_payload, scheme, nonce) = if let Some(ref vk) = self.vault_key {
+            let mut nonce = [0u8; 24];
+            rand_core::OsRng.fill_bytes(&mut nonce);
+
+            let ciphertext_len = (compressed_bytes.len() + 16) as u32;
+            let dummy_header = RecordHeader {
+                chunk_id,
+                compression_codec: codec,
+                encryption_scheme: EncryptionScheme::XChaCha20Poly1305,
+                raw_len: data.len() as u32,
+                payload_len: ciphertext_len,
+                payload_crc: 0,
+                nonce,
+                header_size: RECORD_HEADER_SIZE_V3,
+            };
+            let ciphertext = vk.encrypt_chunk(compressed_bytes, &nonce, &dummy_header.aad())?;
+            (ciphertext, EncryptionScheme::XChaCha20Poly1305, nonce)
+        } else {
+            (compressed_bytes.to_vec(), EncryptionScheme::None, [0u8; 24])
+        };
+
+        let record_size = (RECORD_HEADER_SIZE_V3 + final_payload.len()) as u64;
 
         if self.current_offset + record_size > self.max_segment_size {
             self.rotate()?;
         }
 
         let record_offset = self.current_offset;
-        let payload_offset = record_offset + RECORD_HEADER_SIZE as u64;
+        let payload_offset = record_offset + RECORD_HEADER_SIZE_V3 as u64;
 
-        let record_header = RecordHeader::new(chunk_id, codec, data.len() as u32, payload_bytes);
+        let record_header = RecordHeader::new(
+            chunk_id,
+            codec,
+            scheme,
+            data.len() as u32,
+            &final_payload,
+            nonce,
+        );
         let file = self.current_file.as_mut().ok_or_else(|| {
             crate::error::OosLiteError::Internal("SegmentWriter file handle is closed".to_string())
         })?;
         record_header.write_to(file)?;
-        file.write_all(payload_bytes)?;
+        file.write_all(&final_payload)?;
         file.flush()?;
 
         let location = ChunkLocation {
             segment_id: self.current_segment_id,
             record_offset,
             payload_offset,
-            payload_len: payload_bytes.len() as u32,
+            payload_len: final_payload.len() as u32,
             raw_len: data.len() as u32,
         };
 
@@ -123,14 +157,14 @@ impl SegmentWriter {
             segment_id = self.current_segment_id,
             offset = record_offset,
             raw_size = data.len(),
-            stored_size = payload_bytes.len(),
+            stored_size = final_payload.len(),
             codec = ?codec,
+            scheme = ?scheme,
             "Appended chunk to segment"
         );
 
         Ok(location)
     }
-
 
     pub fn sync(&mut self) -> Result<()> {
         if let Some(ref mut f) = self.current_file {
@@ -162,6 +196,7 @@ impl SegmentWriter {
             next_segment_id,
             0,
             self.max_segment_size,
+            self.vault_key.clone(),
         )?;
         *self = new_writer;
         Ok(())

@@ -2,11 +2,12 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::chunk::ChunkId;
+use crate::crypto::VaultKey;
 use crate::error::{OosLiteError, Result};
-use super::format::{ChunkLocation, CompressionCodec, RecordHeader};
+use super::format::{ChunkLocation, CompressionCodec, EncryptionScheme, RecordHeader};
 use super::writer::segment_file_name;
 
 pub const DEFAULT_MAX_OPEN_SEGMENTS: usize = 128;
@@ -14,6 +15,7 @@ pub const DEFAULT_MAX_OPEN_SEGMENTS: usize = 128;
 pub struct SegmentReader {
     segments_dir: PathBuf,
     cache: Mutex<SegmentFdCache>,
+    vault_key: Option<Arc<VaultKey>>,
 }
 
 struct SegmentFdCache {
@@ -63,13 +65,26 @@ impl SegmentFdCache {
 
 impl SegmentReader {
     pub fn new<P: AsRef<Path>>(segments_dir: P) -> Self {
-        Self::with_max_open_segments(segments_dir, DEFAULT_MAX_OPEN_SEGMENTS)
+        Self::with_max_open_segments_and_vault(segments_dir, DEFAULT_MAX_OPEN_SEGMENTS, None)
+    }
+
+    pub fn with_vault<P: AsRef<Path>>(segments_dir: P, vault_key: Option<Arc<VaultKey>>) -> Self {
+        Self::with_max_open_segments_and_vault(segments_dir, DEFAULT_MAX_OPEN_SEGMENTS, vault_key)
     }
 
     pub fn with_max_open_segments<P: AsRef<Path>>(segments_dir: P, max_open: usize) -> Self {
+        Self::with_max_open_segments_and_vault(segments_dir, max_open, None)
+    }
+
+    pub fn with_max_open_segments_and_vault<P: AsRef<Path>>(
+        segments_dir: P,
+        max_open: usize,
+        vault_key: Option<Arc<VaultKey>>,
+    ) -> Self {
         Self {
             segments_dir: segments_dir.as_ref().to_path_buf(),
             cache: Mutex::new(SegmentFdCache::new(max_open)),
+            vault_key,
         }
     }
 
@@ -79,10 +94,11 @@ impl SegmentReader {
         }
     }
 
-    /// Random reads a chunk from segment file with two-layer integrity defense:
-    /// 1. Physical Layer: Verifies CRC32C over the on-disk bytes BEFORE decompressing.
-    /// 2. Decompression: Unpacks Zstd if chunk was compressed.
-    /// 3. Logical Layer: Verifies BLAKE3 content-addressed identity against the requested ChunkId.
+    /// Random reads a chunk from segment file with multi-layer defense:
+    /// 1. Physical Layer: Verifies CRC32C over the on-disk bytes BEFORE decompressing/decrypting.
+    /// 2. Cryptographic Layer: Authenticates and decrypts ciphertext via XChaCha20-Poly1305 with AAD.
+    /// 3. Compression Layer: Unpacks Zstd if chunk was compressed.
+    /// 4. Logical Layer: Verifies BLAKE3 content-addressed identity against the requested ChunkId.
     pub fn read_chunk(&self, chunk_id: &ChunkId, location: &ChunkLocation) -> Result<Vec<u8>> {
         let mut cache = self.cache.lock().map_err(|e| {
             OosLiteError::Internal(format!("SegmentReader cache lock poisoned: {e}"))
@@ -126,7 +142,7 @@ impl SegmentReader {
         let mut stored_payload = vec![0u8; header.payload_len as usize];
         file.read_exact(&mut stored_payload)?;
 
-        // 1. Physical Layer: Verify CRC32C of stored bytes on disk BEFORE decompressing
+        // 1. Physical Layer: Verify CRC32C of stored bytes on disk BEFORE decrypting/decompressing
         let actual_crc = crc32fast::hash(&stored_payload);
         if header.payload_crc != actual_crc {
             return Err(OosLiteError::ChecksumMismatch {
@@ -136,11 +152,22 @@ impl SegmentReader {
             });
         }
 
-        // 2. Decompress if Zstd, otherwise use raw bytes
+        // 2. Cryptographic Layer: Authenticate and decrypt if encrypted
+        let decompressed_payload = match header.encryption_scheme {
+            EncryptionScheme::None => stored_payload,
+            EncryptionScheme::XChaCha20Poly1305 => {
+                let vk = self.vault_key.as_ref().ok_or_else(|| {
+                    OosLiteError::PasswordRequired
+                })?;
+                vk.decrypt_chunk(&stored_payload, &header.nonce, &header.aad())?
+            }
+        };
+
+        // 3. Compression Layer: Decompress if Zstd, otherwise use raw bytes
         let raw_bytes = match header.compression_codec {
-            CompressionCodec::None => stored_payload,
+            CompressionCodec::None => decompressed_payload,
             CompressionCodec::Zstd => {
-                zstd::decode_all(&stored_payload[..]).map_err(|e| {
+                zstd::decode_all(&decompressed_payload[..]).map_err(|e| {
                     OosLiteError::CorruptedSegment {
                         offset: location.record_offset,
                         reason: format!("Failed to decompress zstd chunk {}: {}", chunk_id, e),
@@ -149,7 +176,7 @@ impl SegmentReader {
             }
         };
 
-        // 3. Logical Layer: Verify BLAKE3 Content Identity on decompressed raw bytes
+        // 4. Logical Layer: Verify BLAKE3 Content Identity on decompressed raw bytes
         let actual_id = ChunkId::from_data(&raw_bytes);
         if &actual_id != chunk_id {
             return Err(OosLiteError::Internal(format!(

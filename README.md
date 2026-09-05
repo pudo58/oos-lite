@@ -162,6 +162,21 @@ oos-lite versions backups/daily.tar.gz
 oos-lite rm backups/daily.tar.gz
 ```
 
+### Encryption at Rest (Zero-Knowledge XChaCha20-Poly1305)
+
+```bash
+# Initialize a new encrypted store with a passphrase (min. 8 characters)
+oos-lite --password "MySecretPassphrase123" init
+# Or supply passphrase via a secure file:
+oos-lite --password-file /path/to/secret.key init
+
+# All subsequent commands require the passphrase (flag, file, or OOS_PASSWORD environment variable):
+oos-lite --password-file /path/to/secret.key put backup.tar.gz
+oos-lite --password-file /path/to/secret.key list
+export OOS_PASSWORD="MySecretPassphrase123"
+oos-lite stats
+```
+
 ### Snapshot Management
 
 ```bash
@@ -194,20 +209,52 @@ oos-lite fsck
 oos-lite ui --host 127.0.0.1 --port 3000
 ```
 
-### Virtual Filesystem (FUSE Mount — Linux / macOS / WSL2)
+### Virtual Filesystem Mount (Windows Native WebDAV / Linux FUSE)
 
 ```bash
-# Mount the store as a read-only POSIX directory with 128 MiB LRU chunk cache
+# Windows: Automatically maps store as virtual network drive Z:\ (zero kernel drivers required)
+oos-lite mount
+
+# Windows: Specify custom drive letter (e.g., Y:)
+oos-lite mount Y:
+
+# Linux / macOS: Mount as a read-only POSIX directory with 128 MiB LRU chunk cache
 oos-lite mount /mnt/oos-drive
 
 # Custom chunk cache memory limit (e.g., 256 MiB)
 oos-lite mount /mnt/oos-drive --cache-mb 256
 
 # Explore the virtual directory hierarchy:
-# /mnt/oos-drive/current/               -> Latest versions of all files
-# /mnt/oos-drive/snapshots/<label>/     -> Complete state of snapshots
-# /mnt/oos-drive/history/<path>/<file>@v<N> -> All historical versions
-# /mnt/oos-drive/history/<path>/<file>@latest -> Virtual symlink to latest version
+# current/               -> Latest versions of all files
+# snapshots/<label>/     -> Complete state of point-in-time snapshots
+# history/<path>/<file>@v<N> -> All historical versions
+# history/<path>/<file>@latest -> Virtual symlink to latest version
+```
+
+### Auto-Vault Live Directory Watcher & Synchronization
+
+```bash
+# Watch a local working folder and automatically commit versions on save:
+oos-lite watch D:/Projects/Active
+
+# Customize debounce window (silence before commit), cooldown (min gap between versions), and I/O throttle:
+oos-lite watch D:/Projects/Active --debounce-secs 3 --cooldown-secs 60 --throttle-ms 10
+
+# Seamless integration with zero-knowledge encryption:
+oos-lite --password-file /path/to/secret.key watch D:/Projects/Active
+```
+
+### Historical Version Pruning
+
+```bash
+# Prune older versions across all files, keeping only the latest 10 versions per file:
+oos-lite prune --keep 10
+
+# Prune versions for a specific file:
+oos-lite prune --keep 5 reports/annual_draft.docx
+
+# Reclaim orphaned chunk disk space immediately:
+oos-lite gc
 ```
 
 ---
@@ -218,18 +265,17 @@ By default, OOS-Lite initializes its storage root in `.oos-store` (customizable 
 
 ```
 .oos-store/
-├── segments/               # Append-only chunk storage
+├── store.lock              # Exclusive single-instance process lock (prevents concurrent corruption)
+├── vault.key               # (Optional) 100-byte encrypted Master Key envelope (Argon2id + XChaCha20)
+├── segments/               # Append-only FastCDC chunk storage
 │   ├── segment_00000001.seg
 │   └── segment_00000002.seg
-├── wal/                    # Redo Write-Ahead Log
+├── wal/                    # Redo Write-Ahead Log with CRC32C verification
 │   └── wal.log
-├── sled/                   # Embedded B-Tree metadata database
-│   ├── conf
-│   ├── db
-│   └── snap.*
-└── snapshots/              # Snapshot manifests
-    ├── v1.0.0.meta
-    └── v1.0.0.data
+└── metadata.db/            # Embedded Sled B-Tree metadata database
+    ├── conf
+    ├── db
+    └── snap.*              # Zero-copy snapshot manifests, name index, object index
 ```
 
 ---
@@ -353,6 +399,8 @@ All core milestones from the OOS-Lite engineering specification have been succes
 - [x] **Milestone 11 — Transparent Chunk Compression (Zstd):** Conditional per-chunk compression (<95% threshold) with physical CRC32C validation, keeping BLAKE3 hashing strictly on raw uncompressed bytes to preserve 100% deduplication.
 - [x] **Milestone 12 — Read-Only FUSE Virtual Filesystem (Milestone 2A):** Zero-copy POSIX mounting exposing `/current`, `/snapshots`, and `/history` with virtual symlinks, on-demand FastCDC chunk reassembly, LRU bounded memory cache, and strict read-only syscall protections.
 - [x] **Milestone 13 — Native Windows WebDAV Drive Mount (Milestone 2B):** Zero-driver Windows mounting via standard WebDAV (`\\127.0.0.1@<port>\DavWWWRoot`), Fake `LOCK`/`UNLOCK` Windows Explorer handshake, multi-threaded request processing, dynamic registry inspection for file size caps, and automated `Ctrl+C` drive unmapping.
+- [x] **Milestone 14 — Zero-Knowledge Encryption at Rest (XChaCha20-Poly1305 + Argon2id):** Hardware-independent authenticated encryption pipeline (Plaintext -> BLAKE3 ChunkID -> Zstd compression -> XChaCha20-Poly1305 -> CRC32C) preserving 100% deduplication. 100-byte `vault.key` master key envelope protected by Argon2id KEK, atomic fsync writes (0600 permissions), encrypted WAL recovery, redacting credentials from debug representations, and strict prohibition of unencrypted-encrypted store hybrid corruption.
+- [x] **Milestone 15 — Auto-Vault Live Watcher & Background Synchronization:** Real-time directory monitoring (`ReadDirectoryChangesW`) on NTFS working folders, TOCTOU-safe streaming file locking (`FILE_SHARE_READ`), automatic debounce & cooldown window preventing version explosion, cold-start background I/O throttling, periodic and buffer-overflow reconciliation scanner, atomic rename handling preserving version history, customizable `.oosignore` filter, and version pruning.
 
 ---
 

@@ -10,8 +10,11 @@ pub mod segment;
 pub mod snapshot;
 pub mod vfs;
 pub mod wal;
+pub mod crypto;
+pub mod watcher;
 
 pub use chunk::{ChunkId, Chunker};
+pub use crypto::{write_vault_file_atomic, VaultKey};
 pub use engine::{EngineStats, PutSummary, StorageEngine};
 pub use error::{OosLiteError, Result};
 pub use fsck::{FsckReport, FsckRunner};
@@ -20,6 +23,7 @@ pub use manifest::Manifest;
 pub use object::{ObjectId, ObjectRecord, ObjectVersion};
 pub use snapshot::{Snapshot, SnapshotEntry};
 pub use vfs::{DecompressedChunkCache, VfsNode, VfsNodeType, VfsTree};
+pub use watcher::{WatcherConfig, WatcherHandle, WatcherService};
 
 
 #[cfg(test)]

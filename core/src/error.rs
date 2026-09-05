@@ -1,4 +1,4 @@
-﻿use thiserror::Error;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum OosLiteError {
@@ -42,6 +42,21 @@ pub enum OosLiteError {
 
     #[error("Internal storage error: {0}")]
     Internal(String),
+
+    #[error("Store is locked by another process: {0}")]
+    StoreLocked(String),
+
+    #[error("Invalid logical file name '{name}': {reason}")]
+    InvalidName { name: String, reason: String },
+
+    #[error("Authentication failed: {0}")]
+    AuthenticationFailed(String),
+
+    #[error("Password required to unlock encrypted store")]
+    PasswordRequired,
+
+    #[error("Decryption failed for chunk: {0}")]
+    DecryptionFailed(String),
 }
 
 pub type Result<T> = std::result::Result<T, OosLiteError>;

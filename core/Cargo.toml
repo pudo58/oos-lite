@@ -12,6 +12,14 @@ sled = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 zstd = { workspace = true }
+fs2 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+argon2 = { workspace = true }
+rand_core = { workspace = true }
+zeroize = { workspace = true }
+notify = { workspace = true }
+walkdir = { workspace = true }
+glob = { workspace = true }
 
 
 [dev-dependencies]

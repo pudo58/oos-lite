@@ -1,13 +1,14 @@
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
 use crate::chunk::ChunkId;
+use crate::crypto::VaultKey;
 use crate::error::{OosLiteError, Result};
 use super::format::{
-    ChunkLocation, RecordHeader, SegmentHeader, RECORD_HEADER_SIZE, SEGMENT_HEADER_SIZE,
+    ChunkLocation, RecordHeader, SegmentHeader, SEGMENT_HEADER_SIZE,
 };
 use super::index::SegmentIndex;
 use super::reader::SegmentReader;
@@ -18,16 +19,29 @@ pub struct SegmentStore {
     index: Arc<SegmentIndex>,
     reader: SegmentReader,
     writer: Mutex<SegmentWriter>,
+    vault_key: Option<Arc<VaultKey>>,
 }
 
 impl SegmentStore {
     pub fn new<P: AsRef<Path>>(dir: P) -> Result<Self> {
-        Self::with_max_segment_size(dir, 0)
+        Self::with_max_segment_size_and_vault(dir, 0, None)
+    }
+
+    pub fn with_vault<P: AsRef<Path>>(dir: P, vault_key: Option<Arc<VaultKey>>) -> Result<Self> {
+        Self::with_max_segment_size_and_vault(dir, 0, vault_key)
     }
 
     pub fn with_max_segment_size<P: AsRef<Path>>(
         dir: P,
         max_segment_size: u64,
+    ) -> Result<Self> {
+        Self::with_max_segment_size_and_vault(dir, max_segment_size, None)
+    }
+
+    pub fn with_max_segment_size_and_vault<P: AsRef<Path>>(
+        dir: P,
+        max_segment_size: u64,
+        vault_key: Option<Arc<VaultKey>>,
     ) -> Result<Self> {
         let segments_dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&segments_dir)?;
@@ -43,14 +57,16 @@ impl SegmentStore {
             latest_segment_id,
             resume_offset,
             max_segment_size,
+            vault_key.clone(),
         )?;
-        let reader = SegmentReader::new(&segments_dir);
+        let reader = SegmentReader::with_vault(&segments_dir, vault_key.clone());
 
         Ok(Self {
             segments_dir,
             index,
             reader,
             writer: Mutex::new(writer),
+            vault_key,
         })
     }
 
@@ -61,8 +77,13 @@ impl SegmentStore {
         index: &SegmentIndex,
     ) -> Result<(u64, u64)> {
         // Cleanup leftover staging or restore from .old in case of crash during compaction
-        let mut has_seg_files = false;
+        let marker_path = segments_dir.join(".compact_done");
+        let compact_done = fs::read(&marker_path)
+            .map(|b| b == b"COMPACT_DONE")
+            .unwrap_or(false);
+
         let mut old_seg_files = Vec::new();
+        let mut new_seg_files = Vec::new();
 
         if let Ok(entries) = fs::read_dir(segments_dir) {
             for entry in entries.flatten() {
@@ -72,24 +93,36 @@ impl SegmentStore {
                 if name_str.starts_with(".compact_tmp_") {
                     let _ = fs::remove_dir_all(&path);
                 } else if name_str.starts_with("segment_") && name_str.ends_with(".seg") {
-                    has_seg_files = true;
+                    new_seg_files.push(path);
                 } else if name_str.starts_with("segment_") && name_str.ends_with(".seg.old") {
                     old_seg_files.push(path);
                 }
             }
         }
 
-        if has_seg_files {
-            for old_path in old_seg_files {
-                let _ = fs::remove_file(old_path);
+        if !old_seg_files.is_empty() {
+            if compact_done {
+                // Compaction succeeded (all new segments were swapped in), crash occurred during .old cleanup
+                for old_path in old_seg_files {
+                    let _ = fs::remove_file(old_path);
+                }
+                let _ = fs::remove_file(&marker_path);
+            } else {
+                // Compaction crashed MID-SWAP! Rollback!
+                // 1. Delete any partially swapped .seg files
+                for seg_path in new_seg_files {
+                    let _ = fs::remove_file(seg_path);
+                }
+                // 2. Restore all .seg.old files back to .seg
+                for old_path in old_seg_files {
+                    let path_str = old_path.to_string_lossy();
+                    let new_path_str = &path_str[..path_str.len() - 4]; // strip ".old"
+                    let _ = fs::rename(&old_path, new_path_str);
+                }
+                let _ = fs::remove_file(&marker_path);
             }
-        } else {
-            // No .seg files found, restore previous .old files if present
-            for old_path in old_seg_files {
-                let path_str = old_path.to_string_lossy();
-                let new_path_str = &path_str[..path_str.len() - 4]; // strip ".old"
-                let _ = fs::rename(&old_path, new_path_str);
-            }
+        } else if marker_path.exists() {
+            let _ = fs::remove_file(&marker_path);
         }
 
         let mut segment_ids = Vec::new();
@@ -139,8 +172,8 @@ impl SegmentStore {
                 file.seek(SeekFrom::Start(current_offset))?;
                 match RecordHeader::read_from(&mut file) {
                     Ok(Some(header)) => {
-                        let payload_offset = current_offset + RECORD_HEADER_SIZE as u64;
-                        let record_len = RECORD_HEADER_SIZE as u64 + header.payload_len as u64;
+                        let payload_offset = current_offset + header.header_size as u64;
+                        let record_len = header.header_size as u64 + header.payload_len as u64;
 
                         // Verify payload existence and CRC
                         if current_offset + record_len > file_len {
@@ -260,6 +293,10 @@ impl SegmentStore {
         self.index.len()
     }
 
+    pub fn vault_key(&self) -> Option<&Arc<VaultKey>> {
+        self.vault_key.as_ref()
+    }
+
     pub fn get_location(&self, id: &ChunkId) -> Option<ChunkLocation> {
         self.index.get(id)
     }
@@ -311,7 +348,7 @@ impl SegmentStore {
         fs::create_dir_all(&tmp_compact_dir)?;
 
         let new_index = SegmentIndex::new();
-        let mut new_writer = SegmentWriter::open(&tmp_compact_dir, 1, 0, max_seg_size)?;
+        let mut new_writer = SegmentWriter::open(&tmp_compact_dir, 1, 0, max_seg_size, self.vault_key.clone())?;
 
         // 3. Stream retained chunks ONE-BY-ONE (Zero-OOM streaming)
         for (id, loc) in self.index.entries() {
@@ -349,6 +386,7 @@ impl SegmentStore {
         }
 
         // Phase 5b: Finalize segment files
+        let marker_path = self.segments_dir.join(".compact_done");
         if retained_count > 0 {
             for entry in fs::read_dir(&tmp_compact_dir)? {
                 let entry = entry?;
@@ -362,25 +400,65 @@ impl SegmentStore {
             }
             let _ = fs::remove_dir_all(&tmp_compact_dir);
 
-            // Phase 5c: New segments are safely in place, now delete backup .old files
+            // Fsync each newly placed segment file
+            if let Ok(entries) = fs::read_dir(&self.segments_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        if name.starts_with("segment_") && name.ends_with(".seg") {
+                            if let Ok(f) = fs::File::open(&path) {
+                                let _ = f.sync_all();
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Sync segments directory entries before creating marker
+            if let Ok(dir_f) = fs::File::open(&self.segments_dir) {
+                let _ = dir_f.sync_all();
+            }
+
+            // Write completion marker indicating all new segments are safely swapped in, and fsync
+            {
+                let mut marker_file = fs::File::create(&marker_path)?;
+                marker_file.write_all(b"COMPACT_DONE")?;
+                marker_file.sync_all()?;
+            }
+
+            // Sync segments directory entries after creating marker
+            if let Ok(dir_f) = fs::File::open(&self.segments_dir) {
+                let _ = dir_f.sync_all();
+            }
+
+            // Phase 5c: New segments are safely in place, now delete backup .old files and marker
             for old_path in old_files {
                 let _ = fs::remove_file(old_path);
             }
+            let _ = fs::remove_file(&marker_path);
 
             // 6. Update in-memory index and re-attach writer
             self.index.replace_with(new_index);
-            *writer_guard = SegmentWriter::open(&self.segments_dir, latest_seg_id, resume_offset, max_seg_size)?;
+            *writer_guard = SegmentWriter::open(&self.segments_dir, latest_seg_id, resume_offset, max_seg_size, self.vault_key.clone())?;
         } else {
             let _ = fs::remove_dir_all(&tmp_compact_dir);
 
-            // Phase 5c: Delete all old files
+            // Write completion marker and fsync
+            {
+                let mut marker_file = fs::File::create(&marker_path)?;
+                marker_file.write_all(b"COMPACT_DONE")?;
+                marker_file.sync_all()?;
+            }
+
+            // Phase 5c: Delete all old files and marker
             for old_path in old_files {
                 let _ = fs::remove_file(old_path);
             }
+            let _ = fs::remove_file(&marker_path);
 
             // 6. When zero chunks are kept, re-initialize fresh segment_00000001.seg with resume_offset 0
             self.index.replace_with(new_index);
-            *writer_guard = SegmentWriter::open(&self.segments_dir, 1, 0, max_seg_size)?;
+            *writer_guard = SegmentWriter::open(&self.segments_dir, 1, 0, max_seg_size, self.vault_key.clone())?;
         }
 
         Ok(dead_count)

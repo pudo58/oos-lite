@@ -2,9 +2,9 @@ name: CI / Multi-Platform Build & Test
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ "main", "master", "0.1.0" ]
   pull_request:
-    branches: [ "main", "master" ]
+    branches: [ "main", "master", "0.1.0" ]
 
 jobs:
   test:

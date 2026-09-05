@@ -418,6 +418,10 @@ impl VfsTree {
             return Ok(Vec::new());
         }
 
+        let _op_guard = self.engine.op_lock().read().map_err(|e| {
+            OosLiteError::Internal(format!("VFS read_range op_lock poisoned: {e}"))
+        })?;
+
         let manifest = self
             .engine
             .metadata_store()

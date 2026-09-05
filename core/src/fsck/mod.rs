@@ -1,5 +1,3 @@
-//! FSCK: File system consistency and integrity checker.
-
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
@@ -7,9 +5,12 @@ use std::path::Path;
 use tracing::info;
 
 use crate::chunk::ChunkId;
+use crate::crypto::VaultKey;
 use crate::error::Result;
 use crate::index::MetadataStore;
-use crate::segment::format::{RecordHeader, SegmentHeader, RECORD_HEADER_SIZE, SEGMENT_HEADER_SIZE};
+use crate::segment::format::{
+    EncryptionScheme, RecordHeader, SegmentHeader, RECORD_HEADER_SIZE_V2, SEGMENT_HEADER_SIZE,
+};
 use crate::segment::SegmentStore;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -36,6 +37,7 @@ impl FsckRunner {
     ) -> Result<FsckReport> {
         let mut report = FsckReport::default();
         let mut physical_chunk_ids: HashSet<ChunkId> = HashSet::new();
+        let vault_key = segment_store.vault_key().map(|a| a.as_ref());
 
         // 1. Scan physical segment files on disk
         if segments_dir.exists() {
@@ -53,7 +55,7 @@ impl FsckRunner {
 
             for path in seg_paths {
                 report.segments_checked += 1;
-                Self::check_segment_file(&path, &mut report, &mut physical_chunk_ids)?;
+                Self::check_segment_file(&path, vault_key, &mut report, &mut physical_chunk_ids)?;
             }
         }
 
@@ -144,6 +146,7 @@ impl FsckRunner {
 
     fn check_segment_file(
         path: &Path,
+        vault_key: Option<&VaultKey>,
         report: &mut FsckReport,
         physical_chunk_ids: &mut HashSet<ChunkId>,
     ) -> Result<()> {
@@ -171,7 +174,7 @@ impl FsckRunner {
 
         let mut offset = SEGMENT_HEADER_SIZE as u64;
         while offset < file_len {
-            if offset + RECORD_HEADER_SIZE as u64 > file_len {
+            if offset + RECORD_HEADER_SIZE_V2 as u64 > file_len {
                 report.corrupted_chunks += 1;
                 report.errors.push(format!(
                     "Segment file {} truncated record header at offset {}",
@@ -185,7 +188,7 @@ impl FsckRunner {
             match RecordHeader::read_from(&mut file) {
                 Ok(Some(header)) => {
                     let payload_len = header.payload_len as usize;
-                    if offset + RECORD_HEADER_SIZE as u64 + payload_len as u64 > file_len {
+                    if offset + header.header_size as u64 + payload_len as u64 > file_len {
                         report.corrupted_chunks += 1;
                         report.errors.push(format!(
                             "Segment file {} payload exceeds EOF at offset {}",
@@ -223,23 +226,49 @@ impl FsckRunner {
                         ));
                     }
 
-                    // 2. Decompress if Zstd, otherwise use raw bytes
-                    let decompressed_result = match header.compression_codec {
-                        crate::segment::format::CompressionCodec::None => Ok(payload),
-                        crate::segment::format::CompressionCodec::Zstd => {
-                            zstd::decode_all(&payload[..]).map_err(|e| {
-                                format!(
-                                    "Segment file {} failed to decompress zstd chunk {} at offset {}: {}",
+                    // 2. Cryptographic Layer: Decrypt if encrypted
+                    let decrypted_result = match header.encryption_scheme {
+                        EncryptionScheme::None => Ok(payload),
+                        EncryptionScheme::XChaCha20Poly1305 => {
+                            if let Some(vk) = vault_key {
+                                vk.decrypt_chunk(&payload, &header.nonce, &header.aad()).map_err(|e| {
+                                    format!(
+                                        "Segment file {} chunk {} failed decryption/authentication: {}",
+                                        path.display(),
+                                        header.chunk_id,
+                                        e
+                                    )
+                                })
+                            } else {
+                                Err(format!(
+                                    "Segment file {} chunk {} is encrypted but no vault key provided",
                                     path.display(),
-                                    header.chunk_id,
-                                    offset,
-                                    e
-                                )
-                            })
+                                    header.chunk_id
+                                ))
+                            }
                         }
                     };
 
-                    // 3. Logical Layer: Verify BLAKE3 Content Identity on decompressed bytes
+                    // 3. Compression Layer: Decompress if Zstd, otherwise use raw bytes
+                    let decompressed_result = match decrypted_result {
+                        Ok(decrypted_payload) => match header.compression_codec {
+                            crate::segment::format::CompressionCodec::None => Ok(decrypted_payload),
+                            crate::segment::format::CompressionCodec::Zstd => {
+                                zstd::decode_all(&decrypted_payload[..]).map_err(|e| {
+                                    format!(
+                                        "Segment file {} failed to decompress zstd chunk {} at offset {}: {}",
+                                        path.display(),
+                                        header.chunk_id,
+                                        offset,
+                                        e
+                                    )
+                                })
+                            }
+                        },
+                        Err(err_msg) => Err(err_msg),
+                    };
+
+                    // 4. Logical Layer: Verify BLAKE3 Content Identity on decompressed bytes
                     match decompressed_result {
                         Ok(raw_data) => {
                             let actual_id = ChunkId::from_data(&raw_data);
@@ -261,7 +290,7 @@ impl FsckRunner {
                     }
 
                     physical_chunk_ids.insert(header.chunk_id);
-                    offset += RECORD_HEADER_SIZE as u64 + payload_len as u64;
+                    offset += header.header_size as u64 + payload_len as u64;
                 }
                 Ok(None) => break,
                 Err(err) => {

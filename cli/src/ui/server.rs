@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,6 +17,47 @@ pub struct MountController {
     pub drive_letter: Option<char>,
     pub port: u16,
     pub stop_flag: Option<Arc<AtomicBool>>,
+}
+
+#[derive(Default)]
+pub struct WatcherController {
+    pub is_running: bool,
+    pub watch_dir: Option<PathBuf>,
+    pub debounce_secs: u64,
+    pub cooldown_secs: u64,
+    pub throttle_ms: u64,
+    pub handle: Option<oos_lite_core::watcher::WatcherHandle>,
+}
+
+#[derive(Serialize)]
+struct ApiWatcherStatus {
+    running: bool,
+    watched_dir: Option<String>,
+    debounce_secs: u64,
+    cooldown_secs: u64,
+    throttle_ms: u64,
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ApiWatcherStartRequest {
+    dir: String,
+    debounce_secs: Option<u64>,
+    cooldown_secs: Option<u64>,
+    throttle_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct ApiPruneRequest {
+    keep: Option<usize>,
+    name: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ApiPruneResponse {
+    ok: bool,
+    pruned_count: usize,
+    message: String,
 }
 
 #[derive(Serialize)]
@@ -138,18 +179,15 @@ struct FileDeleteReq {
 fn json_response<T: Serialize>(data: &T) -> Response<std::io::Cursor<Vec<u8>>> {
     let body = serde_json::to_vec(data).unwrap_or_else(|_| b"{}".to_vec());
     let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
-    let cors = Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap();
-    Response::from_data(body).with_header(ct).with_header(cors)
+    Response::from_data(body).with_header(ct)
 }
 
 fn error_response(status: u16, msg: &str) -> Response<std::io::Cursor<Vec<u8>>> {
     let body = serde_json::to_vec(&ErrorResponse { error: msg.to_string() }).unwrap();
     let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
-    let cors = Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap();
     Response::from_data(body)
         .with_status_code(StatusCode(status))
         .with_header(ct)
-        .with_header(cors)
 }
 
 fn format_relative_time(ts_secs: u64) -> String {
@@ -181,6 +219,7 @@ pub fn start_ui_server(
         .map_err(|e| anyhow::anyhow!("Failed to bind UI server on {}: {}", addr, e))?;
 
     let local_url = if host == "0.0.0.0" {
+        println!("⚠️  SECURITY WARNING: Bound to 0.0.0.0 - Web UI is exposed to LAN without auth!");
         format!("http://localhost:{}", port)
     } else {
         format!("http://{}:{}", host, port)
@@ -198,8 +237,9 @@ pub fn start_ui_server(
     println!("============================================================");
 
     let mount_ctrl = Arc::new(Mutex::new(MountController::default()));
+    let watcher_ctrl = Arc::new(Mutex::new(WatcherController::default()));
 
-    // Create desktop shortcut if requested on Windows
+    // Clean up legacy .bat shortcuts on Windows Desktop if present
     #[cfg(windows)]
     if is_desktop {
         let mut candidates = Vec::new();
@@ -212,24 +252,17 @@ pub fn start_ui_server(
             candidates.push(p.join("Desktop"));
         }
 
-        if let Ok(exe_path) = std::env::current_exe() {
-            let cur_dir = std::env::current_dir().unwrap_or_default();
-            let content = format!("@echo off\r\ncd /d \"{}\"\r\nstart \"\" \"{}\" app\r\n", cur_dir.display(), exe_path.display());
-            for desktop_dir in candidates {
-                if desktop_dir.exists() {
-                    let bat_file = desktop_dir.join("OOS-Lite.bat");
-                    if std::fs::write(&bat_file, &content).is_ok() {
-                        println!("  [✓] Created Desktop shortcut: {}", bat_file.display());
-                        break;
-                    }
-                }
+        for desktop_dir in candidates {
+            let legacy_bat = desktop_dir.join("OOS-Lite.bat");
+            if legacy_bat.exists() {
+                let _ = std::fs::remove_file(&legacy_bat);
             }
         }
     }
 
     // Auto-mount in desktop mode for instant gratification
     if is_desktop {
-        let mut ctrl = mount_ctrl.lock().unwrap();
+        let mut ctrl = mount_ctrl.lock().unwrap_or_else(|p| p.into_inner());
         let mount_port = 8080u16;
         let stop_flag = Arc::new(AtomicBool::new(true));
         let r = Arc::clone(&stop_flag);
@@ -307,8 +340,8 @@ pub fn start_ui_server(
                     }
                 }
                 if !opened {
-                    let _ = std::process::Command::new("cmd")
-                        .args(["/C", "start", &open_url])
+                    let _ = std::process::Command::new("explorer.exe")
+                        .arg(&open_url)
                         .spawn();
                 }
             }
@@ -328,8 +361,9 @@ pub fn start_ui_server(
     for request in server.incoming_requests() {
         let engine_clone = Arc::clone(&engine);
         let mount_ctrl_clone = Arc::clone(&mount_ctrl);
+        let watcher_ctrl_clone = Arc::clone(&watcher_ctrl);
         std::thread::spawn(move || {
-            if let Err(e) = handle_request(engine_clone, mount_ctrl_clone, request) {
+            if let Err(e) = handle_request(engine_clone, mount_ctrl_clone, watcher_ctrl_clone, request) {
                 error!("Request error: {:?}", e);
             }
         });
@@ -338,24 +372,59 @@ pub fn start_ui_server(
     Ok(())
 }
 
+pub fn is_host_allowed(host_val: &str) -> bool {
+    let host_domain = host_val.split(':').next().unwrap_or("").trim();
+    matches!(host_domain, "127.0.0.1" | "localhost" | "")
+}
+
+pub fn is_origin_allowed(origin: &str) -> bool {
+    match Url::parse(origin) {
+        Ok(url) => {
+            (url.scheme() == "http" || url.scheme() == "https")
+                && matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"))
+        }
+        Err(_) => false,
+    }
+}
+
 fn handle_request(
     engine: Arc<StorageEngine>,
     mount_ctrl: Arc<Mutex<MountController>>,
+    watcher_ctrl: Arc<Mutex<WatcherController>>,
     mut request: tiny_http::Request,
 ) -> anyhow::Result<()> {
     let parsed_url = Url::parse(&format!("http://localhost{}", request.url()))?;
     let path = parsed_url.path().to_string();
     let method = request.method().clone();
 
+    // 1. DNS Rebinding & Host header validation
+    if let Some(host_header) = request.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("Host")) {
+        if !is_host_allowed(host_header.value.as_str()) {
+            let _ = request.respond(error_response(403, "Invalid Host header (DNS Rebinding protection)"));
+            return Ok(());
+        }
+    }
+
+    // 2. Fetch Metadata (Sec-Fetch-Site): reject cross-site requests
+    if let Some(sec_site) = request.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("Sec-Fetch-Site")) {
+        let val = sec_site.value.as_str();
+        if val.eq_ignore_ascii_case("cross-site") {
+            let _ = request.respond(error_response(403, "Cross-Site Requests Forbidden"));
+            return Ok(());
+        }
+    }
+
+    // 3. CSRF Protection: Strict Origin validation
+    if let Some(origin_header) = request.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("Origin")) {
+        if !is_origin_allowed(origin_header.value.as_str()) {
+            let _ = request.respond(error_response(403, "Cross-Origin Requests (CORS/CSRF) Forbidden"));
+            return Ok(());
+        }
+    }
+
     // CORS preflight
     if method == Method::Options {
-        let cors1 = Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap();
-        let cors2 = Header::from_bytes(&b"Access-Control-Allow-Methods"[..], &b"GET, POST, OPTIONS"[..]).unwrap();
-        let cors3 = Header::from_bytes(&b"Access-Control-Allow-Headers"[..], &b"Content-Type"[..]).unwrap();
-        let resp = Response::empty(StatusCode(204))
-            .with_header(cors1)
-            .with_header(cors2)
-            .with_header(cors3);
+        let resp = Response::empty(StatusCode(204));
         let _ = request.respond(resp);
         return Ok(());
     }
@@ -594,8 +663,12 @@ fn handle_request(
                     let dir_str = req.dir.trim();
                     let dir_path = Path::new(dir_str);
                     let has_parent_traversal = dir_path.components().any(|c| matches!(c, std::path::Component::ParentDir));
-                    if dir_str.is_empty() || has_parent_traversal {
-                        let _ = request.respond(error_response(400, "Invalid or disallowed restore directory path (relative traversal detected)"));
+                    let is_absolute_or_root = dir_path.is_absolute()
+                        || dir_path.components().any(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Prefix(_)));
+                    let normal_count = dir_path.components().filter(|c| matches!(c, std::path::Component::Normal(_))).count();
+
+                    if dir_str.is_empty() || has_parent_traversal || is_absolute_or_root || normal_count == 0 {
+                        let _ = request.respond(error_response(400, "Invalid restore directory: must be a relative subdirectory without parent traversal"));
                         return Ok(());
                     }
                     match engine.restore_snapshot(&req.label, Path::new(dir_str)) {
@@ -750,14 +823,17 @@ fn handle_request(
             if ctrl.stop_flag.is_none() {
                 let stop_flag = Arc::new(AtomicBool::new(true));
                 let r = Arc::clone(&stop_flag);
-                let _ = crate::mount::webdav::start_webdav_server(
+                if let Err(e) = crate::mount::webdav::start_webdav_server(
                     Arc::clone(&engine),
                     "127.0.0.1",
                     port,
                     128,
                     8,
                     r,
-                );
+                ) {
+                    let _ = request.respond(error_response(500, &format!("Không thể khởi động WebDAV server tại cổng {}: {}", port, e)));
+                    return Ok(());
+                }
                 ctrl.stop_flag = Some(stop_flag);
                 ctrl.port = port;
             }
@@ -847,10 +923,168 @@ fn handle_request(
             }
         }
 
+        (Method::Get, "/api/watcher/status") => {
+            let mut ctrl = watcher_ctrl.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(ref h) = ctrl.handle {
+                ctrl.is_running = h.is_running();
+            } else {
+                ctrl.is_running = false;
+            }
+            let resp = ApiWatcherStatus {
+                running: ctrl.is_running,
+                watched_dir: ctrl.watch_dir.as_ref().map(|p| p.display().to_string()),
+                debounce_secs: if ctrl.debounce_secs == 0 { 3 } else { ctrl.debounce_secs },
+                cooldown_secs: if ctrl.cooldown_secs == 0 { 60 } else { ctrl.cooldown_secs },
+                throttle_ms: if ctrl.throttle_ms == 0 { 10 } else { ctrl.throttle_ms },
+                message: None,
+            };
+            let _ = request.respond(json_response(&resp));
+        }
+
+        (Method::Post, "/api/watcher/start") => {
+            let mut body = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut body);
+            let req_data: ApiWatcherStartRequest = match serde_json::from_slice(&body) {
+                Ok(d) => d,
+                Err(_) => {
+                    let _ = request.respond(error_response(400, "Invalid JSON body for watcher start"));
+                    return Ok(());
+                }
+            };
+
+            let target_dir = PathBuf::from(&req_data.dir);
+            if !target_dir.is_dir() {
+                let _ = request.respond(error_response(400, "Thư mục không tồn tại / Directory does not exist"));
+                return Ok(());
+            }
+
+            let debounce = req_data.debounce_secs.unwrap_or(3);
+            let cooldown = req_data.cooldown_secs.unwrap_or(60);
+            let throttle = req_data.throttle_ms.unwrap_or(10);
+
+            let mut ctrl = watcher_ctrl.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(h) = ctrl.handle.take() {
+                h.stop();
+            }
+
+            let config = oos_lite_core::watcher::WatcherConfig::new(&target_dir)
+                .with_debounce(std::time::Duration::from_secs(debounce))
+                .with_cooldown(std::time::Duration::from_secs(cooldown))
+                .with_throttle_ms(throttle);
+
+            let service = oos_lite_core::watcher::WatcherService::new(Arc::clone(&engine), config);
+            match service.start() {
+                Ok(handle) => {
+                    ctrl.is_running = true;
+                    ctrl.watch_dir = Some(target_dir.clone());
+                    ctrl.debounce_secs = debounce;
+                    ctrl.cooldown_secs = cooldown;
+                    ctrl.throttle_ms = throttle;
+                    ctrl.handle = Some(handle);
+
+                    let resp = ApiWatcherStatus {
+                        running: true,
+                        watched_dir: Some(target_dir.display().to_string()),
+                        debounce_secs: debounce,
+                        cooldown_secs: cooldown,
+                        throttle_ms: throttle,
+                        message: Some("Đã kích hoạt Auto-Vault Watcher thành công".to_string()),
+                    };
+                    let _ = request.respond(json_response(&resp));
+                }
+                Err(e) => {
+                    let _ = request.respond(error_response(500, &format!("Không thể khởi động Watcher: {}", e)));
+                }
+            }
+        }
+
+        (Method::Post, "/api/watcher/stop") => {
+            let mut ctrl = watcher_ctrl.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(h) = ctrl.handle.take() {
+                h.stop();
+            }
+            ctrl.is_running = false;
+            let resp = ApiWatcherStatus {
+                running: false,
+                watched_dir: ctrl.watch_dir.as_ref().map(|p| p.display().to_string()),
+                debounce_secs: ctrl.debounce_secs,
+                cooldown_secs: ctrl.cooldown_secs,
+                throttle_ms: ctrl.throttle_ms,
+                message: Some("Đã tạm dừng Auto-Vault Watcher".to_string()),
+            };
+            let _ = request.respond(json_response(&resp));
+        }
+
+        (Method::Post, "/api/prune") => {
+            let mut body = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut body);
+            let req_data: ApiPruneRequest = serde_json::from_slice(&body).unwrap_or(ApiPruneRequest {
+                keep: Some(10),
+                name: None,
+            });
+
+            let keep = req_data.keep.unwrap_or(10).max(1);
+            let pruned_res = if let Some(ref target_name) = req_data.name {
+                engine.prune_file_versions(target_name, keep)
+            } else {
+                engine.prune_all(keep)
+            };
+
+            match pruned_res {
+                Ok(count) => {
+                    let resp = ApiPruneResponse {
+                        ok: true,
+                        pruned_count: count,
+                        message: format!("Đã dọn dẹp {} phiên bản cũ (giữ lại {} bản gần nhất)", count, keep),
+                    };
+                    let _ = request.respond(json_response(&resp));
+                }
+                Err(e) => {
+                    let _ = request.respond(error_response(500, &format!("Lỗi khi dọn dẹp phiên bản: {}", e)));
+                }
+            }
+        }
+
         _ => {
             let _ = request.respond(error_response(404, "Endpoint not found"));
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_csrf_origin_validation() {
+        // Valid Origins
+        assert!(is_origin_allowed("http://127.0.0.1:3000"));
+        assert!(is_origin_allowed("http://localhost:3000"));
+        assert!(is_origin_allowed("http://localhost"));
+        assert!(is_origin_allowed("http://127.0.0.1"));
+        assert!(is_origin_allowed("https://localhost:8080"));
+
+        // Attackers / Bypasses
+        assert!(!is_origin_allowed("http://127.0.0.1.evil.com"));
+        assert!(!is_origin_allowed("http://localhost.evil.com"));
+        assert!(!is_origin_allowed("http://evil.com"));
+        assert!(!is_origin_allowed("null"));
+        assert!(!is_origin_allowed(""));
+        assert!(!is_origin_allowed("file:///etc/passwd"));
+        assert!(!is_origin_allowed("javascript:alert(1)"));
+    }
+
+    #[test]
+    fn test_host_header_validation() {
+        assert!(is_host_allowed("localhost:3000"));
+        assert!(is_host_allowed("127.0.0.1:3000"));
+        assert!(is_host_allowed("localhost"));
+        assert!(is_host_allowed("127.0.0.1"));
+
+        assert!(!is_host_allowed("evil.com"));
+        assert!(!is_host_allowed("evil.com:3000"));
+        assert!(!is_host_allowed("localhost.attacker.com"));
+    }
 }

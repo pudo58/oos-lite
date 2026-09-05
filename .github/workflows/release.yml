@@ -1,0 +1,91 @@
+name: Release / Build Assets
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name for release (e.g. v0.1.0)'
+        required: false
+        default: 'v0.1.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build Windows Release & Publish Assets
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Rust Stable Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Inno Setup via Chocolatey
+        run: |
+          choco install innosetup --no-progress
+
+      - name: Build Optimized Release Binaries
+        run: |
+          cargo build --release -p oos-lite --bins
+
+      - name: Create Standalone Binary ZIP Archive
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target\release\oos-lite.exe, target\release\oos-lite-gui.exe, README.md, LICENSE-MIT -DestinationPath oos-lite-windows-x86_64.zip
+
+      - name: Compile Windows Installer with Inno Setup
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\oos-lite.iss
+
+      - name: Generate SHA-256 Checksums
+        shell: pwsh
+        run: |
+          $hashes = Get-FileHash -Algorithm SHA256 dist\OOS-Lite-Setup-v0.1.0.exe, oos-lite-windows-x86_64.zip
+          $hashes | ForEach-Object { "$($_.Hash)  $($_.Path | Split-Path -Leaf)" } | Out-File -Encoding utf8 SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+
+      - name: Determine Release Tag
+        id: get_tag
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $tag = "${{ github.ref_name }}"
+          } elseif ("${{ inputs.tag_name }}" -ne "") {
+            $tag = "${{ inputs.tag_name }}"
+          } else {
+            $tag = "v0.1.0"
+          }
+          echo "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Create GitHub Release & Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.get_tag.outputs.tag }}
+          name: "OOS-Lite ${{ steps.get_tag.outputs.tag }} - Windows Versioned & Encrypted Drive"
+          body: |
+            ## OOS-Lite v0.1.0 - Windows Versioned & Encrypted Drive
+
+            ### 🚀 What's New in v0.1.0:
+            - **Windows Versioned Drive (WebDAV Z:\)**: Transparent mount to Windows Explorer with zero custom kernel drivers required.
+            - **End-to-End Encryption**: XChaCha20-Poly1305 with BLAKE3 MAC, Argon2id key derivation, and atomic vault key management.
+            - **Auto-Vault & Live Sync**: Background real-time directory watcher with TOCTOU-safe locking, debounce, and automatic 3-tier reconciliation.
+            - **Desktop GUI & System Tray**: Native Windows tray integration, zero CMD console flash, folder tree explorer, and dual-language (EN/VI) support.
+            - **Data Integrity & Garbage Collection**: Mark-and-sweep GC and segment FSCK integrity validation.
+
+            ### 📦 Download Assets:
+            - **Installer (.exe)**: `OOS-Lite-Setup-v0.1.0.exe` (Recommended for Windows users)
+            - **Portable CLI/GUI (.zip)**: `oos-lite-windows-x86_64.zip`
+            - **Integrity Checksums**: `SHA256SUMS.txt`
+          draft: false
+          prerelease: false
+          files: |
+            dist/OOS-Lite-Setup-v0.1.0.exe
+            oos-lite-windows-x86_64.zip
+            SHA256SUMS.txt
