@@ -7,6 +7,7 @@ use oos_lite_core::StorageEngine;
 mod ui;
 mod mount;
 mod tray;
+mod shell_ext;
 
 #[derive(Parser)]
 #[command(name = "oos-lite", author, version, about = "OOS-Lite Content-Addressed File Storage CLI", long_about = None)]
@@ -61,6 +62,15 @@ enum Commands {
     Versions {
         #[arg(help = "File name or ObjectID")]
         target: String,
+    },
+    #[command(about = "Roll back a file to a specific historical version")]
+    Rollback {
+        #[arg(help = "Logical file name")]
+        name: String,
+        #[arg(short, long, help = "Target historical version number to roll back to")]
+        version: u32,
+        #[arg(short, long, help = "Optional destination file path on disk to apply in-place")]
+        out: Option<PathBuf>,
     },
     #[command(about = "Delete a file by logical name", alias = "delete")]
     Rm {
@@ -122,6 +132,23 @@ enum Commands {
         #[arg(help = "Optional specific file name to prune (defaults to all files)")]
         name: Option<String>,
     },
+    #[command(about = "Manage Windows Explorer context menu integration (toggle right-click menu)")]
+    ShellExt {
+        #[command(subcommand)]
+        action: ShellExtCommands,
+    },
+    #[command(
+        about = "Handle Windows Explorer right-click menu action (called internally by context menu)",
+        hide = true
+    )]
+    ContextMenu {
+        #[command(subcommand)]
+        action: ContextMenuCommands,
+    },
+    #[command(about = "Stop all running OOS-Lite background processes and free ports (3000, 8080)", alias = "kill")]
+    Stop,
+    #[command(about = "Uninstall OOS-Lite, terminate processes, free ports, and clean components")]
+    Uninstall,
 }
 
 #[derive(Subcommand, Debug)]
@@ -147,6 +174,72 @@ enum SnapshotCommands {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum ShellExtCommands {
+    #[command(about = "Register OOS-Lite in Windows Explorer right-click menu")]
+    Enable,
+    #[command(about = "Remove OOS-Lite from Windows Explorer right-click menu")]
+    Disable,
+    #[command(about = "Show current registration status")]
+    Status,
+}
+
+#[derive(Subcommand, Debug)]
+enum ContextMenuCommands {
+    #[command(about = "Store a file or folder in OOS-Lite Vault")]
+    StoreFile {
+        #[arg(help = "File or folder path")]
+        path: String,
+    },
+    #[command(about = "Open version history for a file or folder")]
+    ViewHistory {
+        #[arg(help = "File or folder path")]
+        path: String,
+    },
+    #[command(about = "Create a snapshot from context of a file or folder")]
+    Snapshot {
+        #[arg(help = "File or folder path (used to label the snapshot)")]
+        path: String,
+    },
+    #[command(about = "Open restore dialog for a file")]
+    Restore {
+        #[arg(help = "File or folder path")]
+        path: String,
+    },
+    #[command(about = "Watch folder with Auto-Vault")]
+    Watch {
+        #[arg(help = "Folder path")]
+        path: String,
+    },
+    #[command(about = "Browse folder in OOS-Lite Explorer")]
+    Browse {
+        #[arg(help = "Folder path")]
+        path: String,
+    },
+}
+
+fn resolve_canonical_store_dir(specified: &PathBuf) -> PathBuf {
+    if specified != &PathBuf::from(".oos-store") {
+        return specified.clone();
+    }
+    if let Ok(val) = std::env::var("OOS_STORE_DIR") {
+        if !val.is_empty() {
+            return PathBuf::from(val);
+        }
+    }
+    let cur = PathBuf::from(".oos-store");
+    if cur.is_dir() {
+        return cur;
+    }
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        let p = PathBuf::from(profile).join(".oos-store");
+        if p.is_dir() {
+            return p;
+        }
+    }
+    cur
+}
+
 fn resolve_password(cli: &Cli) -> anyhow::Result<Option<String>> {
     if let Some(ref p) = cli.password {
         return Ok(Some(p.clone()));
@@ -166,25 +259,171 @@ fn resolve_password(cli: &Cli) -> anyhow::Result<Option<String>> {
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
-    info!("OOS-Lite CLI initialized with store at: {}", cli.store_dir.display());
+
+    // ── Early dispatch for commands that do not touch the storage engine ────
+    match &cli.command {
+        Commands::ShellExt { action } => {
+            #[cfg(windows)]
+            {
+                use shell_ext::windows as sx;
+                match action {
+                    ShellExtCommands::Enable => {
+                        sx::register()?;
+                        println!("✓ OOS-Lite context menu registered in Windows Explorer.");
+                        println!("  Right-click any file or folder to see the OOS-Lite submenu.");
+                    }
+                    ShellExtCommands::Disable => {
+                        sx::unregister()?;
+                        println!("✓ OOS-Lite context menu removed from Windows Explorer.");
+                    }
+                    ShellExtCommands::Status => {
+                        if sx::is_registered() {
+                            println!("● OOS-Lite context menu: ENABLED (registered in HKCU registry)");
+                        } else {
+                            println!("○ OOS-Lite context menu: DISABLED (not registered)");
+                        }
+                    }
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = action;
+                eprintln!("Context menu integration is only available on Windows.");
+            }
+            return Ok(());
+        }
+        Commands::ContextMenu { action } => {
+            #[cfg(windows)]
+            {
+                use shell_ext::windows as sx;
+                match action {
+                    ContextMenuCommands::StoreFile { path } => sx::handle_store_file(path),
+                    ContextMenuCommands::ViewHistory { path } => sx::handle_view_history(path),
+                    ContextMenuCommands::Snapshot { path } => sx::handle_snapshot(path),
+                    ContextMenuCommands::Restore { path } => sx::handle_restore(path),
+                    ContextMenuCommands::Watch { path } => sx::handle_watch(path),
+                    ContextMenuCommands::Browse { path } => sx::handle_browse(path),
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = action;
+            }
+            return Ok(());
+        }
+        Commands::Stop => {
+            #[cfg(windows)]
+            {
+                println!("==> Stopping OOS-Lite background processes and freeing ports...");
+
+                // 1. Unmap virtual drive Z:
+                let _ = std::process::Command::new("net.exe")
+                    .args(["use", "Z:", "/delete", "/y"])
+                    .output();
+                println!("  ✓ Unmapped virtual drive Z: (if connected)");
+
+                // 2. Terminate running GUI background process
+                let _ = std::process::Command::new("taskkill.exe")
+                    .args(["/F", "/T", "/IM", "oos-lite-gui.exe"])
+                    .output();
+                println!("  ✓ Terminated oos-lite-gui.exe background process");
+
+                // 3. Kill any processes holding ports 3000 and 8080
+                let ps_script = "Get-NetTCPConnection -LocalPort 3000, 8080 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }";
+                let _ = std::process::Command::new("powershell.exe")
+                    .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_script])
+                    .output();
+                println!("  ✓ Freed TCP ports 3000 (UI) and 8080 (WebDAV)");
+
+                println!("✓ All OOS-Lite processes stopped and ports cleared.");
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = std::process::Command::new("pkill").arg("-f").arg("oos-lite").output();
+                println!("✓ Stopped oos-lite processes.");
+            }
+            return Ok(());
+        }
+        Commands::Uninstall => {
+            #[cfg(windows)]
+            {
+                println!("============================================================");
+                println!("               OOS-LITE UNINSTALLATION                      ");
+                println!("============================================================");
+                println!("1. Stopping background processes and unmapping drive Z:...");
+                let _ = std::process::Command::new("net.exe")
+                    .args(["use", "Z:", "/delete", "/y"])
+                    .output();
+                let _ = std::process::Command::new("taskkill.exe")
+                    .args(["/F", "/T", "/IM", "oos-lite-gui.exe"])
+                    .output();
+                let ps_script = "Get-NetTCPConnection -LocalPort 3000, 8080 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }";
+                let _ = std::process::Command::new("powershell.exe")
+                    .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_script])
+                    .output();
+                println!("   ✓ Done.");
+
+                println!("2. Removing Explorer context menu integration...");
+                let _ = shell_ext::windows::unregister();
+                println!("   ✓ Done.");
+
+                println!("3. Cleaning up temporary application data...");
+                if let Ok(local) = std::env::var("LOCALAPPDATA") {
+                    let appdata_dir = std::path::PathBuf::from(local).join("oos-lite");
+                    if appdata_dir.exists() {
+                        let _ = std::fs::remove_dir_all(&appdata_dir);
+                    }
+                }
+                println!("   ✓ Done.");
+
+                // If Inno Setup unins000.exe exists in the exe directory, invoke it
+                if let Ok(exe_path) = std::env::current_exe() {
+                    if let Some(parent) = exe_path.parent() {
+                        let unins = parent.join("unins000.exe");
+                        if unins.exists() {
+                            println!("4. Launching Inno Setup uninstaller...");
+                            let _ = std::process::Command::new(&unins).args(["/SILENT"]).status();
+                            println!("   ✓ Removed installed files and shortcuts.");
+                        }
+                    }
+                }
+
+                println!("============================================================");
+                println!("✓ OOS-Lite has been successfully uninstalled.");
+                println!("  Note: Your vault data in %USERPROFILE%\\.oos-store was preserved.");
+                println!("        To delete it, remove the folder manually.");
+                println!("============================================================");
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = std::process::Command::new("pkill").arg("-f").arg("oos-lite").output();
+                println!("✓ OOS-Lite uninstalled.");
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    let store_dir = resolve_canonical_store_dir(&cli.store_dir);
+    info!("OOS-Lite CLI initialized with store at: {}", store_dir.display());
 
     let password = resolve_password(&cli)?;
 
     if let Commands::Init = cli.command {
         if let Some(ref pwd) = password {
-            StorageEngine::init_encrypted(&cli.store_dir, pwd)?;
-            println!("✓ Initialized encrypted OOS-Lite store at {}", cli.store_dir.display());
+            StorageEngine::init_encrypted(&store_dir, pwd)?;
+            println!("✓ Initialized encrypted OOS-Lite store at {}", store_dir.display());
         } else {
-            StorageEngine::open(&cli.store_dir)?;
-            println!("✓ Initialized unencrypted OOS-Lite store at {}", cli.store_dir.display());
+            StorageEngine::open(&store_dir)?;
+            println!("✓ Initialized unencrypted OOS-Lite store at {}", store_dir.display());
         }
         return Ok(());
     }
 
     let engine = if let Some(ref pwd) = password {
-        Arc::new(StorageEngine::open_with_password(&cli.store_dir, pwd)?)
+        Arc::new(StorageEngine::open_with_password(&store_dir, pwd)?)
     } else {
-        match StorageEngine::open(&cli.store_dir) {
+        match StorageEngine::open(&store_dir) {
             Ok(eng) => Arc::new(eng),
             Err(oos_lite_core::error::OosLiteError::PasswordRequired) => {
                 eprintln!("Error: This store is encrypted. Please provide --password, --password-file, or set the OOS_PASSWORD environment variable.");
@@ -243,6 +482,14 @@ fn main() -> anyhow::Result<()> {
             for v in versions {
                 let dt = chrono_format(v.created_at);
                 println!("#{:<9} {:<20} {:<14} bytes {:<64}", v.version, dt, v.size_bytes, v.manifest_id);
+            }
+        }
+        Commands::Rollback { name, version, out } => {
+            println!("==> Rolling back '{}' to version #{}...", name, version);
+            let (new_ver, bytes) = engine.rollback_file(&name, version, out.as_ref())?;
+            println!("✓ Successfully rolled back '{}' to version #{} (recorded as version #{})", name, version, new_ver);
+            if let Some(ref p) = out {
+                println!("  Restored in-place to: {} ({} bytes)", p.display(), bytes);
             }
         }
         Commands::Stats => {
@@ -404,7 +651,7 @@ fn main() -> anyhow::Result<()> {
             }
             println!("  Run 'oos-lite gc' to reclaim disk space from pruned versions.");
         }
-        Commands::Init => unreachable!(),
+        Commands::ShellExt { .. } | Commands::ContextMenu { .. } | Commands::Init | Commands::Stop | Commands::Uninstall => unreachable!(),
     }
 
     Ok(())

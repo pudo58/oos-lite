@@ -3,6 +3,9 @@
 # ==============================================================================
 /target/
 /dist/
+*.zip
+SHA256SUMS.txt
+tag_notes.txt
 **/*.rs.bk
 *.pdb
 Cargo.lock.bak

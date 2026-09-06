@@ -2,8 +2,8 @@
 <html lang="en" class="dark">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OOS-Lite Desktop</title>
+  <title>OOS-Lite Desktop - Vault & Version Explorer</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%234f46e5'/><path d='M30 35 L70 35 L70 65 L30 65 Z' fill='none' stroke='white' stroke-width='8'/><circle cx='50' cy='50' r='8' fill='white'/></svg>">
   <!-- Tailwind CSS via CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- Chart.js via CDN -->
@@ -563,6 +563,59 @@
         <!-- MAINTENANCE RESULT CONSOLE -->
         <div id="maintenance-result" class="hidden mt-5 p-4 rounded-xl text-xs font-mono leading-relaxed"></div>
       </div>
+
+      <!-- WINDOWS CONTEXT MENU INTEGRATION CARD -->
+      <div class="card rounded-2xl p-6">
+        <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+          <div class="flex-1">
+            <div class="flex items-center gap-3">
+              <span class="w-10 h-10 rounded-xl bg-violet-500/10 flex items-center justify-center text-xl border border-violet-500/20">🖱️</span>
+              <div>
+                <h3 class="text-sm font-bold text-white">Windows Explorer Context Menu</h3>
+                <p class="text-[11px] text-slate-400 mt-0.5">Add OOS-Lite actions to right-click menu for any file or folder</p>
+              </div>
+            </div>
+            <p class="text-xs text-slate-400 mt-4 leading-relaxed">
+              When enabled, right-clicking any file or folder in Windows Explorer shows an
+              <strong class="text-slate-200">OOS-Lite</strong> submenu with 3 quick actions:
+            </p>
+            <div class="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <div class="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900/60 border border-slate-800/60 text-xs text-slate-300">
+                <span class="text-sm">🕐</span>
+                <span><strong>View History</strong> — version list</span>
+              </div>
+              <div class="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900/60 border border-slate-800/60 text-xs text-slate-300">
+                <span class="text-sm">📸</span>
+                <span><strong>Snapshot Now</strong> — instant capture</span>
+              </div>
+              <div class="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900/60 border border-slate-800/60 text-xs text-slate-300">
+                <span class="text-sm">↩️</span>
+                <span><strong>Restore...</strong> — pick a version</span>
+              </div>
+            </div>
+            <p class="text-[10px] text-slate-500 mt-3">
+              ✅ Uses <code>HKCU</code> registry — no administrator rights required. Safe to enable/disable at any time.
+            </p>
+          </div>
+
+          <!-- Toggle Switch -->
+          <div class="flex flex-col items-center gap-3 shrink-0 min-w-[120px]">
+            <div id="shell-ext-status-dot" class="flex items-center gap-2 text-[11px] font-mono">
+              <span class="w-2 h-2 rounded-full bg-slate-600" id="shell-ext-dot"></span>
+              <span id="shell-ext-status-text" class="text-slate-400">Checking...</span>
+            </div>
+            <button id="shell-ext-toggle-btn"
+              onclick="toggleShellExt()"
+              class="px-5 py-2 rounded-xl text-xs font-bold border transition-all cursor-pointer bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700 min-w-[100px]"
+              disabled>
+              ...
+            </button>
+          </div>
+        </div>
+
+        <!-- Shell ext result message -->
+        <div id="shell-ext-result" class="hidden mt-4 p-3 rounded-xl text-xs font-mono"></div>
+      </div>
     </div>
 
     <!-- ========================================================================= -->
@@ -791,29 +844,192 @@
   </div>
 
   <!-- ========================================================================= -->
-  <!-- MODAL: VERSION HISTORY -->
+  <!-- MODAL: VERSION HISTORY & DIFF STUDIO -->
   <!-- ========================================================================= -->
-  <div id="versions-modal" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md hidden flex items-center justify-center p-4">
-    <div class="card max-w-2xl w-full rounded-2xl flex flex-col max-h-[85vh] overflow-hidden border border-slate-700/80">
-      <div class="flex items-center justify-between px-6 py-4 border-b border-slate-800/80 bg-slate-900/60">
-        <div>
-          <h3 id="modal-file-name" class="text-sm font-bold text-white font-mono">Version History</h3>
-          <p class="text-[11px] text-slate-400">All historical snapshots and versions preserved by OOS-Lite</p>
+  <div id="versions-modal" class="fixed inset-0 z-50 bg-black/85 backdrop-blur-md hidden flex items-center justify-center p-3 sm:p-4">
+    <div class="card max-w-5xl w-full rounded-2xl flex flex-col max-h-[92vh] h-[90vh] overflow-hidden border border-slate-700/80 shadow-2xl bg-slate-900/95">
+      <!-- Modal Header -->
+      <div class="flex items-center justify-between px-5 py-3 border-b border-slate-800/90 bg-slate-900/90 shrink-0">
+        <div class="min-w-0 flex-1 pr-3">
+          <div class="flex items-center gap-2">
+            <span class="text-base">🕒</span>
+            <h3 id="modal-file-name" class="text-sm font-bold text-white font-mono truncate">Version History & Diff Studio</h3>
+          </div>
+          <p id="modal-file-desc" class="text-[11px] text-slate-400 truncate mt-0.5">All historical snapshots and versions preserved by OOS-Lite</p>
         </div>
-        <button onclick="closeVersionsModal()" class="text-slate-400 hover:text-white text-lg font-bold">&times;</button>
+        <button onclick="closeVersionsModal()" class="text-slate-400 hover:text-white text-xl font-bold cursor-pointer p-1 transition-colors leading-none">&times;</button>
       </div>
-      <div class="overflow-y-auto p-4 flex-1">
-        <table class="w-full text-left font-mono text-xs">
-          <thead class="text-slate-400 uppercase bg-slate-900/60 text-[10px]">
-            <tr>
-              <th class="py-2.5 px-3">Ver</th>
-              <th class="py-2.5 px-3">Size</th>
-              <th class="py-2.5 px-3">Manifest ID</th>
-              <th class="py-2.5 px-3 text-right">Action</th>
-            </tr>
-          </thead>
-          <tbody id="versions-modal-body" class="divide-y divide-slate-800/50"></tbody>
-        </table>
+
+      <!-- Top Section: Version List Table -->
+      <div class="border-b border-slate-800/90 bg-slate-950/40 shrink-0 flex flex-col" style="max-height: 220px;">
+        <div class="px-4 py-1.5 bg-slate-900/60 text-[10px] uppercase font-bold tracking-wider text-slate-400 flex items-center justify-between border-b border-slate-800/60">
+          <span id="versions-table-header-title" data-i18n="versions_table_header_title">Danh Sách Các Phiên Bản (Bấm hàng để chọn so sánh)</span>
+          <span id="versions-count-badge" class="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 font-mono text-[9px]">0 versions</span>
+        </div>
+        <div class="overflow-y-auto flex-1">
+          <table class="w-full text-left font-mono text-xs">
+            <thead class="text-slate-400 uppercase bg-slate-900/90 text-[10px] sticky top-0 z-10 backdrop-blur-sm">
+              <tr>
+                <th class="py-2 px-3" data-i18n="th_ver">Ver</th>
+                <th class="py-2 px-3" data-i18n="th_time">Date / Time</th>
+                <th class="py-2 px-3" data-i18n="th_size">Size</th>
+                <th class="py-2 px-3">Manifest ID</th>
+                <th class="py-2 px-3 text-right" data-i18n="th_actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="versions-modal-body" class="divide-y divide-slate-800/50"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Bottom Section: Version Diff & Inspector Studio -->
+      <div class="flex-1 flex flex-col min-h-0 bg-[#080d1a]">
+        <!-- Inspector Controls Bar -->
+        <div class="px-4 py-2 bg-slate-900/90 border-b border-slate-800/80 flex flex-wrap items-center justify-between gap-2 shrink-0">
+          <div class="flex items-center gap-2 min-w-0">
+            <span class="text-xs font-bold text-slate-200 shrink-0" id="diff-section-title">🔍 So Sánh Khác Biệt</span>
+            <div id="diff-badges-container" class="flex items-center gap-1.5 text-[10px] font-mono truncate">
+              <!-- Dynamically rendered badge info -->
+            </div>
+          </div>
+          
+          <div class="flex items-center gap-2 shrink-0">
+            <!-- Mode Switcher -->
+            <div class="inline-flex rounded-lg bg-slate-950 p-0.5 border border-slate-800 text-[11px]">
+              <button id="diff-mode-btn-diff" onclick="setDiffViewMode('diff')" class="px-2.5 py-1 rounded-md font-semibold text-white bg-indigo-600 transition-colors">
+                🔀 So Sánh Diff
+              </button>
+              <button id="diff-mode-btn-selected" onclick="setDiffViewMode('selected')" class="px-2.5 py-1 rounded-md font-semibold text-slate-400 hover:text-slate-200 transition-colors">
+                📄 Bản Đang Chọn
+              </button>
+              <button id="diff-mode-btn-current" onclick="setDiffViewMode('current')" class="px-2.5 py-1 rounded-md font-semibold text-slate-400 hover:text-slate-200 transition-colors">
+                📋 Bản Hiện Tại
+              </button>
+            </div>
+
+            <!-- Copy Content Button (visible in selected/current mode) -->
+            <button id="diff-copy-content-btn" onclick="copyInspectorText()" class="hidden px-2 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-mono transition-colors" title="Copy text to clipboard">
+              📋 Copy
+            </button>
+
+            <!-- Quick In-Place Rollback Button in Inspector -->
+            <button id="diff-rollback-btn" onclick="executeSelectedVersionRollback()" class="hidden items-center gap-1.5 px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-md shadow-emerald-600/20 transition-all cursor-pointer">
+              <span>🔄 Áp Dụng Bản Này</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Diff / Content Display Area -->
+        <div id="diff-content-area" class="flex-1 overflow-auto p-3 font-mono text-xs select-text">
+          <div class="flex flex-col items-center justify-center h-full text-slate-500 py-12">
+            <div class="text-3xl mb-2">👁️</div>
+            <div id="diff-placeholder-text">Chọn một phiên bản ở danh sách trên để xem nội dung và so sánh</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========================================================================= -->
+  <!-- MODAL: ADD / STORE IN VAULT PROMPT -->
+  <!-- ========================================================================= -->
+  <div id="store-prompt-modal" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center p-4">
+    <div class="card max-w-lg w-full rounded-2xl p-6 border border-slate-700/80 space-y-4 shadow-2xl">
+      <div class="flex items-start gap-3.5">
+        <div class="w-11 h-11 rounded-2xl bg-indigo-500/15 text-indigo-400 flex items-center justify-center text-xl shrink-0 border border-indigo-500/25">
+          📦
+        </div>
+        <div class="flex-1 min-w-0">
+          <h4 id="store-prompt-title" class="font-bold text-sm text-white">Store in OOS-Lite Vault</h4>
+          <p id="store-prompt-message" class="text-xs text-slate-300 mt-1 leading-relaxed">
+            This file is not tracked in your store yet. Would you like to store and start tracking version history now?
+          </p>
+          <div class="mt-3 p-2.5 rounded-xl bg-slate-950/70 border border-slate-800 text-[11px] font-mono text-indigo-300 break-all" id="store-prompt-path">
+            C:\...
+          </div>
+        </div>
+      </div>
+      <div class="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-800/80">
+        <button onclick="closeStorePromptModal()" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer">
+          Cancel
+        </button>
+        <button id="store-prompt-submit-btn" onclick="executeStoreFromPrompt()" class="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold shadow-lg shadow-indigo-600/20 cursor-pointer flex items-center gap-1.5">
+          <span>➕ Add to Vault Now</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========================================================================= -->
+  <!-- MODAL: FOLDER ACTION HUB -->
+  <!-- ========================================================================= -->
+  <div id="folder-action-modal" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center p-4">
+    <div class="card max-w-xl w-full rounded-2xl p-6 border border-slate-700/80 space-y-5 shadow-2xl">
+      <div class="flex items-start gap-3.5">
+        <div class="w-12 h-12 rounded-2xl bg-violet-500/15 text-violet-400 flex items-center justify-center text-2xl shrink-0 border border-violet-500/25">
+          📁
+        </div>
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2">
+            <h4 id="folder-action-title" class="font-bold text-base text-white" data-i18n="folder_action_title">Folder Action Hub</h4>
+            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-violet-500/20 text-violet-300 border border-violet-500/30 uppercase tracking-wider">Folder</span>
+          </div>
+          <p id="folder-action-desc" class="text-xs text-slate-300 mt-1 leading-relaxed" data-i18n="folder_action_desc">
+            Choose how you would like OOS-Lite to handle this directory:
+          </p>
+          <div class="mt-2.5 p-2.5 rounded-xl bg-slate-950/70 border border-slate-800 text-[11px] font-mono text-violet-300 break-all flex items-center gap-2">
+            <span class="text-slate-500 select-none">📂</span>
+            <span id="folder-action-path">C:\...</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Action Option Cards -->
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+        <!-- Card 1: Snapshot & Ingest -->
+        <div class="group relative rounded-xl p-4 bg-slate-900/60 border border-slate-800 hover:border-violet-500/50 hover:bg-slate-800/50 transition-all flex flex-col justify-between">
+          <div>
+            <div class="flex items-center gap-2 mb-2">
+              <span class="w-8 h-8 rounded-lg bg-violet-500/20 text-violet-400 flex items-center justify-center text-base">📸</span>
+              <h5 class="font-bold text-xs text-white" data-i18n="folder_snapshot_title">Snapshot Folder</h5>
+            </div>
+            <p class="text-[11px] text-slate-400 leading-normal" data-i18n="folder_snapshot_desc">
+              Recursively ingests all files with deduplication and creates an immutable point-in-time snapshot.
+            </p>
+          </div>
+          <div class="mt-4 pt-3 border-t border-slate-800/80">
+            <button id="folder-snapshot-btn" onclick="executeFolderSnapshot()" class="w-full py-2 px-3 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-xs font-bold transition-all shadow-md shadow-violet-600/20 flex items-center justify-center gap-1.5 cursor-pointer">
+              <span data-i18n="folder_snapshot_btn">📸 Ingest & Snapshot</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Card 2: Auto-Vault Watch -->
+        <div class="group relative rounded-xl p-4 bg-slate-900/60 border border-slate-800 hover:border-emerald-500/50 hover:bg-slate-800/50 transition-all flex flex-col justify-between">
+          <div>
+            <div class="flex items-center gap-2 mb-2">
+              <span class="w-8 h-8 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-base">⚡</span>
+              <h5 class="font-bold text-xs text-white" data-i18n="folder_watch_title">Watch with Auto-Vault</h5>
+            </div>
+            <p class="text-[11px] text-slate-400 leading-normal" data-i18n="folder_watch_desc">
+              Continuously monitors this folder in the background and auto-commits versions whenever files change.
+            </p>
+          </div>
+          <div class="mt-4 pt-3 border-t border-slate-800/80">
+            <button id="folder-watch-btn" onclick="executeFolderWatch()" class="w-full py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition-all shadow-md shadow-emerald-600/20 flex items-center justify-center gap-1.5 cursor-pointer">
+              <span data-i18n="folder_watch_btn">⚡ Start Auto-Vault</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Ingest Progress / Result Container (hidden by default) -->
+      <div id="folder-action-status" class="hidden p-3 rounded-xl text-xs font-mono"></div>
+
+      <div class="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-800/80">
+        <button onclick="closeFolderActionModal()" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer">
+          Close
+        </button>
       </div>
     </div>
   </div>
@@ -989,7 +1205,49 @@
       "prune_keep_label": "Số phiên bản gần nhất cần giữ lại:",
       "prune_target_label": "Tập tin áp dụng (để trống nếu áp dụng cho toàn kho):",
       "btn_run_prune": "✂️ Thực Thi Dọn Dẹp Phiên Bản",
-      "btn_trigger_gc": "🧹 Chạy Thu Dọn Rác (GC) Ngay →"
+      "btn_trigger_gc": "🧹 Chạy Thu Dọn Rác (GC) Ngay →",
+      "store_prompt_not_tracked_title": "Tập Tin Chưa Có Trong Kho",
+      "store_prompt_not_tracked_desc": "Tập tin này hiện chưa có trong kho OOS-Lite. Bạn có muốn thêm vào kho để bắt đầu theo dõi lịch sử phiên bản ngay bây giờ không?",
+      "store_prompt_add_title": "Thêm Vào Kho OOS-Lite",
+      "store_prompt_add_desc": "Lưu phiên bản mới của tập tin này vào kho dữ liệu cục bộ.",
+      "store_prompt_btn": "➕ Thêm Vào Kho Ngay",
+      "store_prompt_storing": "⏳ Đang Lưu Trữ...",
+      "folder_action_title": "Trung Tâm Thư Mục (Folder Action Hub)",
+      "folder_action_desc": "Chọn tác vụ bạn muốn OOS-Lite thực hiện với thư mục này:",
+      "folder_snapshot_title": "Tạo Bản Sao Lưu (Snapshot)",
+      "folder_snapshot_desc": "Quét toàn bộ thư mục, lưu trữ khử trùng lặp và đóng băng snapshot điểm thời gian.",
+      "folder_snapshot_btn": "📸 Nạp Thư Mục & Tạo Snapshot",
+      "folder_watch_title": "Giám Sát Tự Động (Auto-Vault)",
+      "folder_watch_desc": "Tự động đồng bộ và lưu phiên bản mới tức thì khi có file trong thư mục này thay đổi.",
+      "folder_watch_btn": "⚡ Bật Giám Sát Tự Động",
+      "modal_versions_desc": "Toàn bộ lịch sử các phiên bản được lưu trữ trong OOS-Lite. Bấm 'Áp Dụng' để phục hồi trực tiếp tập tin về phiên bản đó.",
+      "th_ver": "Phiên Bản",
+      "th_time": "Thời Gian",
+      "th_actions": "Thao Tác",
+      "rollback_btn": "🔄 Áp Dụng",
+      "rollback_latest_badge": "HIỆN TẠI",
+      "rollback_confirm_title": "Khôi Phục Về Phiên Bản",
+      "rollback_confirm_desc": "Tập tin sẽ được áp dụng trực tiếp về phiên bản này trên ổ đĩa. Một phiên bản mới sẽ được tự động ghi nhận trong kho.",
+      "rollback_success_title": "Đã Khôi Phục Thành Công",
+      "rollback_disk_updated": "Đã ghi trực tiếp vào ổ đĩa:",
+      "diff_studio_title": "Lịch Sử Phiên Bản & So Sánh Khác Biệt (Diff Studio)",
+      "diff_section_title": "🔍 So Sánh & Kiểm Tra Nội Dung",
+      "diff_mode_diff": "🔀 So Sánh Diff",
+      "diff_mode_selected": "📄 Bản Đang Chọn",
+      "diff_mode_current": "📋 Bản Hiện Tại",
+      "diff_apply_this_btn": "🔄 Áp Dụng Bản #",
+      "diff_legend_del": "Bản Hiện Tại",
+      "diff_legend_add": "Bản Đang Chọn (Sẽ khôi phục)",
+      "diff_line_diffs": "dòng khác biệt",
+      "diff_identical": "✅ Không có sự khác biệt giữa phiên bản này và bản hiện tại (Nội dung giống hệt nhau).",
+      "diff_only_one": "ℹ️ Đây là phiên bản duy nhất hiện có của tập tin trong kho.",
+      "diff_binary_title": "Tập Tin Nhị Phân / Không Thể So Sánh Dòng Chữ",
+      "diff_binary_desc": "Tập tin này có định dạng nhị phân. Bạn có thể kiểm tra kích thước và mã hash ở trên, hoặc bấm Áp Dụng để khôi phục trực tiếp.",
+      "diff_image_compare": "So Sánh Hình Ảnh Giữa 2 Phiên Bản",
+      "diff_loading": "⏳ Đang tải nội dung và phân tích so sánh...",
+      "diff_select_prompt": "Bấm vào một phiên bản ở danh sách trên để xem nội dung và so sánh khác biệt với bản hiện tại",
+      "action_diff_inspect": "👁️ So Sánh / Xem",
+      "versions_table_header_title": "Danh Sách Các Phiên Bản (Bấm hàng để chọn so sánh)"
     },
     en: {
       "app_subtitle": "Content-Addressed & Deduplicated Storage Engine",
@@ -999,6 +1257,20 @@
       "tab_upload": "Upload Center",
       "tab_maintenance": "Maintenance & Health",
       "tab_watcher": "Auto-Vault & Sync",
+      "store_prompt_not_tracked_title": "File Not in Vault Yet",
+      "store_prompt_not_tracked_desc": "This file is not tracked in your OOS-Lite store yet. Would you like to store it and begin tracking its version history now?",
+      "store_prompt_add_title": "Store File in Vault",
+      "store_prompt_add_desc": "Store a new version of this file into your local content-addressed vault.",
+      "store_prompt_btn": "➕ Add to Vault Now",
+      "store_prompt_storing": "⏳ Storing...",
+      "folder_action_title": "Folder Action Hub",
+      "folder_action_desc": "Choose how you would like OOS-Lite to handle this directory:",
+      "folder_snapshot_title": "Snapshot Folder",
+      "folder_snapshot_desc": "Recursively ingests all files with deduplication and creates an immutable point-in-time snapshot.",
+      "folder_snapshot_btn": "📸 Ingest & Snapshot",
+      "folder_watch_title": "Watch with Auto-Vault",
+      "folder_watch_desc": "Continuously monitors this folder in the background and auto-commits versions whenever files change.",
+      "folder_watch_btn": "⚡ Start Auto-Vault",
       "mount_btn_offline": "⚡ Connect Drive Z:\\",
       "mount_btn_active": "Drive Z:\\ Connected (Click to disconnect)",
       "mount_btn_tip_offline": "Click to mount the virtual drive into Windows Explorer",
@@ -1135,7 +1407,35 @@
       "prune_keep_label": "Keep latest N versions:",
       "prune_target_label": "Target file (empty = all files):",
       "btn_run_prune": "✂️ Run Prune",
-      "btn_trigger_gc": "🧹 Run Garbage Collection (GC) Now →"
+      "btn_trigger_gc": "🧹 Run Garbage Collection (GC) Now →",
+      "modal_versions_desc": "All historical versions preserved by OOS-Lite. Click 'Rollback' to apply that version directly to disk in-place.",
+      "th_ver": "Version",
+      "th_time": "Date / Time",
+      "th_actions": "Actions",
+      "rollback_btn": "🔄 Rollback",
+      "rollback_latest_badge": "CURRENT",
+      "rollback_confirm_title": "Roll Back to Version",
+      "rollback_confirm_desc": "The file will be restored in-place directly on disk to this version. A new version entry will be recorded in vault.",
+      "rollback_success_title": "Rollback Succeeded",
+      "rollback_disk_updated": "Directly updated on disk at:",
+      "diff_studio_title": "Version History & Diff Studio",
+      "diff_section_title": "🔍 Version Inspector & Diff Studio",
+      "diff_mode_diff": "🔀 Line Diff",
+      "diff_mode_selected": "📄 Selected Version",
+      "diff_mode_current": "📋 Current Version",
+      "diff_apply_this_btn": "🔄 Apply Ver #",
+      "diff_legend_del": "Current Version",
+      "diff_legend_add": "Selected Version (Restores this)",
+      "diff_line_diffs": "line differences",
+      "diff_identical": "✅ Content of this version is identical to the current version (No changes).",
+      "diff_only_one": "ℹ️ This is the only version of this file in the vault.",
+      "diff_binary_title": "Binary File / Text Diff Not Applicable",
+      "diff_binary_desc": "This file is binary. You can inspect its file size and hash above, or click Rollback to restore directly.",
+      "diff_image_compare": "Visual Image Comparison",
+      "diff_loading": "⏳ Loading file content and computing diff...",
+      "diff_select_prompt": "Select a version above to view its content and compare differences with current",
+      "action_diff_inspect": "👁️ Diff / View",
+      "versions_table_header_title": "Historical Versions (Click row to inspect & diff)"
     }
   };
 
@@ -1239,16 +1539,22 @@
     }
 
     // Confirmation Modal (Replaces native confirm)
-    function showConfirm(title, message, onConfirm) {
+    function showConfirm(title, message, onConfirm, btnText = 'Confirm', btnClass = 'bg-rose-600 hover:bg-rose-500') {
       document.getElementById('confirm-title').innerText = title;
       document.getElementById('confirm-message').innerText = message;
+      const btn = document.getElementById('confirm-execute-btn');
+      if (btn) {
+        btn.innerText = btnText;
+        btn.className = `px-4 py-2 rounded-xl text-white text-xs font-semibold cursor-pointer ${btnClass}`;
+      }
       confirmCallback = onConfirm;
       document.getElementById('confirm-modal').classList.remove('hidden');
     }
 
     document.getElementById('confirm-execute-btn').onclick = () => {
-      closeConfirmModal(true);
-      if (confirmCallback) confirmCallback();
+      const cb = confirmCallback;
+      closeConfirmModal();
+      if (cb) cb();
     };
 
     function closeConfirmModal() {
@@ -1272,6 +1578,9 @@
       });
       if (tabId === 'watcher') {
         fetchWatcherStatus();
+      }
+      if (tabId === 'maintenance') {
+        loadShellExtStatus();
       }
     }
 
@@ -1980,38 +2289,967 @@
     }
 
     // ==========================================
-    // VERSIONS MODAL
+    // VERSIONS MODAL & ROLLBACK
     // ==========================================
-    async function openVersionsModal(encodedName) {
+    let currentVersionsFileName = null;
+    let currentVersionsDiskPath = null;
+    let currentVersionsList = [];
+    let selectedDiffVersion = null;
+    let diffViewMode = 'diff'; // 'diff' | 'selected' | 'current'
+    const cachedVersionData = new Map();
+    let inspectorCurrentText = '';
+
+    function getFileCategory(fileName) {
+      const ext = (fileName || '').split('.').pop().toLowerCase();
+      const isImage = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'ico'].includes(ext);
+      const isText = ['txt', 'md', 'rs', 'js', 'ts', 'py', 'go', 'html', 'css', 'json', 'log', 'c', 'cpp', 'h', 'hpp', 'toml', 'yaml', 'yml', 'xml', 'ini', 'sh', 'bat', 'cmd', 'ps1', 'sql', 'csv', 'tsv', 'env', 'conf', 'cfg', 'diff', 'patch'].includes(ext);
+      return { ext, isImage, isText };
+    }
+
+    function runMyers(a, b) {
+      const n = a.length;
+      const m = b.length;
+      const max = n + m;
+      const v = {};
+      const trace = [];
+
+      v[1] = 0;
+      for (let d = 0; d <= max; d++) {
+        trace.push({ ...v });
+        for (let k = -d; k <= d; k += 2) {
+          let x;
+          if (k === -d || (k !== d && (v[k - 1] === undefined ? -Infinity : v[k - 1]) < (v[k + 1] === undefined ? -Infinity : v[k + 1]))) {
+            x = v[k + 1];
+          } else {
+            x = v[k - 1] + 1;
+          }
+          let y = x - k;
+          while (x < n && y < m && a[x] === b[y]) {
+            x++;
+            y++;
+          }
+          v[k] = x;
+          if (x >= n && y >= m) {
+            const edits = [];
+            let curX = n;
+            let curY = m;
+            for (let cd = d; cd > 0; cd--) {
+              const prevV = trace[cd];
+              const curK = curX - curY;
+              let prevK;
+              if (curK === -cd || (curK !== cd && (prevV[curK - 1] === undefined ? -Infinity : prevV[curK - 1]) < (prevV[curK + 1] === undefined ? -Infinity : prevV[curK + 1]))) {
+                prevK = curK + 1;
+              } else {
+                prevK = curK - 1;
+              }
+              const prevX = prevV[prevK];
+              const prevY = prevX - prevK;
+              while (curX > prevX && curY > prevY) {
+                curX--;
+                curY--;
+                edits.unshift({ type: 'same', text: a[curX] });
+              }
+              if (curX === prevX) {
+                curY--;
+                edits.unshift({ type: 'add', text: b[curY] });
+              } else {
+                curX--;
+                edits.unshift({ type: 'del', text: a[curX] });
+              }
+            }
+            while (curX > 0 && curY > 0) {
+              curX--;
+              curY--;
+              edits.unshift({ type: 'same', text: a[curX] });
+            }
+            return edits;
+          }
+        }
+      }
+      return [
+        ...a.map(l => ({ type: 'del', text: l })),
+        ...b.map(l => ({ type: 'add', text: l }))
+      ];
+    }
+
+    function computeLineDiff(textSelected, textCurrent) {
+      if (textSelected === textCurrent) {
+        const lines = (textSelected || '').split(/\r?\n/);
+        return {
+          identical: true,
+          stats: { added: 0, removed: 0 },
+          lines: lines.map((l, i) => ({ type: 'same', oldNum: i + 1, newNum: i + 1, text: l }))
+        };
+      }
+
+      const linesSelected = (textSelected || '').split(/\r?\n/);
+      const linesCurrent = (textCurrent || '').split(/\r?\n/);
+
+      let prefix = 0;
+      while (prefix < linesSelected.length && prefix < linesCurrent.length && linesSelected[prefix] === linesCurrent[prefix]) {
+        prefix++;
+      }
+
+      let suffix = 0;
+      while (
+        suffix < (linesSelected.length - prefix) &&
+        suffix < (linesCurrent.length - prefix) &&
+        linesSelected[linesSelected.length - 1 - suffix] === linesCurrent[linesCurrent.length - 1 - suffix]
+      ) {
+        suffix++;
+      }
+
+      const midSelected = linesSelected.slice(prefix, linesSelected.length - suffix);
+      const midCurrent = linesCurrent.slice(prefix, linesCurrent.length - suffix);
+
+      let midEdits = [];
+      if (midSelected.length === 0) {
+        midEdits = midCurrent.map(l => ({ type: 'del', text: l }));
+      } else if (midCurrent.length === 0) {
+        midEdits = midSelected.map(l => ({ type: 'add', text: l }));
+      } else if (midSelected.length + midCurrent.length > 2000) {
+        midEdits = [
+          ...midCurrent.map(l => ({ type: 'del', text: l })),
+          ...midSelected.map(l => ({ type: 'add', text: l }))
+        ];
+      } else {
+        midEdits = runMyers(midCurrent, midSelected);
+      }
+
+      const resultLines = [];
+      let curOldNum = 1;
+      let curNewNum = 1;
+      let addedCount = 0;
+      let removedCount = 0;
+
+      for (let i = 0; i < prefix; i++) {
+        resultLines.push({ type: 'same', oldNum: curOldNum++, newNum: curNewNum++, text: linesSelected[i] });
+      }
+
+      for (const edit of midEdits) {
+        if (edit.type === 'same') {
+          resultLines.push({ type: 'same', oldNum: curOldNum++, newNum: curNewNum++, text: edit.text });
+        } else if (edit.type === 'del') {
+          removedCount++;
+          resultLines.push({ type: 'del', oldNum: null, newNum: curNewNum++, text: edit.text });
+        } else if (edit.type === 'add') {
+          addedCount++;
+          resultLines.push({ type: 'add', oldNum: curOldNum++, newNum: null, text: edit.text });
+        }
+      }
+
+      const suffixStart = linesSelected.length - suffix;
+      for (let i = 0; i < suffix; i++) {
+        resultLines.push({ type: 'same', oldNum: curOldNum++, newNum: curNewNum++, text: linesSelected[suffixStart + i] });
+      }
+
+      return {
+        identical: false,
+        stats: { added: addedCount, removed: removedCount },
+        lines: resultLines
+      };
+    }
+
+    async function openVersionsModal(encodedName, optionalDiskPath = null) {
       const name = decodeURIComponent(encodedName);
-      document.getElementById('modal-file-name').innerText = `Versions: ${name}`;
+      currentVersionsFileName = name;
+      currentVersionsDiskPath = optionalDiskPath || null;
+      if (!currentVersionsDiskPath && cachedWatcherStatus && cachedWatcherStatus.watched_dir) {
+        const cleanWatched = cachedWatcherStatus.watched_dir.replace(/[\/\\]+$/, '');
+        currentVersionsDiskPath = `${cleanWatched}\\${name.replace(/\//g, '\\')}`;
+      }
+
+      cachedVersionData.clear();
+      selectedDiffVersion = null;
+      diffViewMode = 'diff';
+
+      const titleEl = document.getElementById('modal-file-name');
+      const descEl = document.getElementById('modal-file-desc');
+      if (titleEl) titleEl.innerText = `${t('diff_studio_title')}: ${name}`;
+      if (descEl) {
+        if (currentVersionsDiskPath) {
+          descEl.innerHTML = `<span class="text-indigo-400 font-mono text-[10px] break-all">📍 ${escapeHtml(currentVersionsDiskPath)}</span><br>${t('modal_versions_desc')}`;
+        } else {
+          descEl.innerText = t('modal_versions_desc');
+        }
+      }
+
       const tbody = document.getElementById('versions-modal-body');
-      tbody.innerHTML = '<tr><td colspan="4" class="py-6 text-center text-slate-400 font-mono">Loading versions...</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="5" class="py-6 text-center text-slate-400 font-mono">Loading versions...</td></tr>';
       document.getElementById('versions-modal').classList.remove('hidden');
 
       try {
         const res = await fetch(`/api/versions?name=${encodeURIComponent(name)}`);
         const versions = await res.json();
-        tbody.innerHTML = versions.map(v => `
-          <tr class="hover:bg-slate-800/40">
-            <td class="py-2.5 px-3 font-bold text-indigo-400">#${v.version}</td>
-            <td class="py-2.5 px-3 text-slate-300">${formatBytes(v.size_bytes)}</td>
-            <td class="py-2.5 px-3 text-slate-400 text-[11px]">${v.manifest_id.substring(0, 24)}...</td>
-            <td class="py-2.5 px-3 text-right">
-              <a href="/api/download?target=${encodeURIComponent(name)}&version=${v.version}" class="px-2 py-1 rounded bg-indigo-600/80 hover:bg-indigo-600 text-white text-xs">Download v${v.version}</a>
-            </td>
-          </tr>
-        `).join('');
+        if (!Array.isArray(versions) || versions.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="5" class="py-6 text-center text-slate-400 font-mono">No versions recorded.</td></tr>';
+          document.getElementById('diff-content-area').innerHTML = `<div class="text-slate-500 text-center py-12">No versions recorded.</div>`;
+          return;
+        }
+
+        versions.sort((a, b) => b.version - a.version);
+        currentVersionsList = versions;
+        const maxVer = versions[0].version;
+
+        const countBadge = document.getElementById('versions-count-badge');
+        if (countBadge) countBadge.innerText = `${versions.length} ${versions.length === 1 ? 'version' : 'versions'}`;
+
+        tbody.innerHTML = versions.map(v => {
+          const isLatest = v.version === maxVer;
+          const badge = isLatest
+            ? `<span class="ml-1.5 px-1.5 py-0.5 text-[9px] font-bold rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">${t('rollback_latest_badge')}</span>`
+            : '';
+          const timeStr = formatTimestamp(v.created_at);
+          const rawEnc = encodeURIComponent(name);
+
+          return `
+            <tr id="version-row-${v.version}"
+                onclick="selectVersionForInspector(${v.version})"
+                class="version-table-row hover:bg-slate-800/60 cursor-pointer transition-colors border-l-4 border-transparent">
+              <td class="py-2 px-3 font-bold text-indigo-400 whitespace-nowrap">
+                #${v.version} ${badge}
+              </td>
+              <td class="py-2 px-3 text-slate-400 text-[11px] whitespace-nowrap">${timeStr}</td>
+              <td class="py-2 px-3 text-slate-300 whitespace-nowrap">${formatBytes(v.size_bytes)}</td>
+              <td class="py-2 px-3 text-slate-500 text-[11px] font-mono whitespace-nowrap" title="${v.manifest_id}">${v.manifest_id.substring(0, 16)}...</td>
+              <td class="py-2 px-3 text-right whitespace-nowrap space-x-1.5">
+                <button onclick="event.stopPropagation(); selectVersionForInspector(${v.version})"
+                        class="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-indigo-600/25 hover:bg-indigo-600/40 text-indigo-300 text-xs border border-indigo-500/30 transition-colors"
+                        title="${t('action_diff_inspect')}">
+                  ${t('action_diff_inspect')}
+                </button>
+                ${!isLatest ? `
+                <button onclick="event.stopPropagation(); confirmRollbackVersion('${rawEnc}', ${v.version}, ${v.size_bytes})"
+                        class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg bg-emerald-600/85 hover:bg-emerald-600 text-white text-xs font-semibold shadow-sm transition-all cursor-pointer"
+                        title="${currentLang === 'vi' ? 'Áp dụng phiên bản này trực tiếp vào file trên ổ đĩa' : 'Apply this version directly in-place to disk'}">
+                  ${t('rollback_btn')}
+                </button>` : ''}
+                <a href="/api/download?target=${rawEnc}&version=${v.version}"
+                   onclick="event.stopPropagation();"
+                   class="inline-flex items-center px-2 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs border border-slate-700 transition-colors"
+                   title="${currentLang === 'vi' ? 'Tải về bản sao' : 'Download copy'}">
+                  ⬇
+                </a>
+              </td>
+            </tr>
+          `;
+        }).join('');
+
+        // Auto-select: default to prior version if exists, else latest
+        if (versions.length >= 2) {
+          selectVersionForInspector(versions[1].version);
+        } else {
+          diffViewMode = 'selected';
+          selectVersionForInspector(versions[0].version);
+        }
       } catch (err) {
-        tbody.innerHTML = `<tr><td colspan="4" class="py-4 text-center text-rose-400">Error: ${escapeHtml(err.message)}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="5" class="py-4 text-center text-rose-400">Error: ${escapeHtml(err.message)}</td></tr>`;
       }
+    }
+
+    async function selectVersionForInspector(versionNumber) {
+      if (!currentVersionsList || currentVersionsList.length === 0) return;
+      selectedDiffVersion = versionNumber;
+      const maxVer = currentVersionsList[0].version;
+      const selObj = currentVersionsList.find(v => v.version === versionNumber);
+
+      // Highlight active table row
+      document.querySelectorAll('.version-table-row').forEach(r => {
+        r.classList.remove('bg-indigo-950/70', 'border-indigo-500');
+        r.classList.add('border-transparent');
+      });
+      const activeRow = document.getElementById(`version-row-${versionNumber}`);
+      if (activeRow) {
+        activeRow.classList.add('bg-indigo-950/70', 'border-indigo-500');
+        activeRow.classList.remove('border-transparent');
+      }
+
+      // Update rollback button in Inspector
+      const rollbackBtn = document.getElementById('diff-rollback-btn');
+      if (rollbackBtn) {
+        if (versionNumber !== maxVer && selObj) {
+          rollbackBtn.classList.remove('hidden');
+          rollbackBtn.classList.add('flex');
+          rollbackBtn.innerHTML = `<span>${t('diff_apply_this_btn')}${versionNumber}</span>`;
+        } else {
+          rollbackBtn.classList.add('hidden');
+          rollbackBtn.classList.remove('flex');
+        }
+      }
+
+      updateModeButtonStyles();
+      await renderInspectorView();
+    }
+
+    function setDiffViewMode(mode) {
+      diffViewMode = mode;
+      updateModeButtonStyles();
+      renderInspectorView();
+    }
+
+    function updateModeButtonStyles() {
+      const modes = ['diff', 'selected', 'current'];
+      modes.forEach(m => {
+        const btn = document.getElementById(`diff-mode-btn-${m}`);
+        if (!btn) return;
+        if (m === diffViewMode) {
+          btn.className = 'px-2.5 py-1 rounded-md font-semibold text-white bg-indigo-600 transition-colors shadow-sm';
+        } else {
+          btn.className = 'px-2.5 py-1 rounded-md font-semibold text-slate-400 hover:text-slate-200 transition-colors';
+        }
+      });
+    }
+
+    async function renderInspectorView() {
+      const area = document.getElementById('diff-content-area');
+      const titleEl = document.getElementById('diff-section-title');
+      const badgesContainer = document.getElementById('diff-badges-container');
+      const copyBtn = document.getElementById('diff-copy-content-btn');
+
+      if (!currentVersionsFileName || selectedDiffVersion === null || !currentVersionsList || currentVersionsList.length === 0) {
+        area.innerHTML = `
+          <div class="flex flex-col items-center justify-center h-full text-slate-500 py-12">
+            <div class="text-3xl mb-2">👁️</div>
+            <div>${t('diff_select_prompt')}</div>
+          </div>
+        `;
+        return;
+      }
+
+      const maxVer = currentVersionsList[0].version;
+      const isLatest = selectedDiffVersion === maxVer;
+      const selObj = currentVersionsList.find(v => v.version === selectedDiffVersion);
+      const curObj = currentVersionsList[0];
+      const { isImage, isText } = getFileCategory(currentVersionsFileName);
+
+      // Title & badges
+      if (titleEl) {
+        if (diffViewMode === 'diff') {
+          titleEl.innerText = isLatest
+            ? `${t('diff_section_title')} (Bản #${selectedDiffVersion})`
+            : `${t('diff_section_title')}: #${selectedDiffVersion} ➔ #${maxVer}`;
+        } else if (diffViewMode === 'selected') {
+          titleEl.innerText = `${t('diff_mode_selected')} (#${selectedDiffVersion})`;
+        } else {
+          titleEl.innerText = `${t('diff_mode_current')} (#${maxVer})`;
+        }
+      }
+
+      if (badgesContainer) {
+        badgesContainer.innerHTML = `
+          <span class="px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-bold">#${selectedDiffVersion}</span>
+          ${!isLatest ? `<span class="text-slate-500">vs</span><span class="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-bold">#${maxVer} (${t('rollback_latest_badge')})</span>` : ''}
+        `;
+      }
+
+      // Hide copy button by default
+      if (copyBtn) copyBtn.classList.add('hidden');
+
+      // 1. Image comparison
+      if (isImage) {
+        const rawEnc = encodeURIComponent(currentVersionsFileName);
+        const selUrl = `/api/download?target=${rawEnc}&version=${selectedDiffVersion}`;
+        const curUrl = `/api/download?target=${rawEnc}&version=${maxVer}`;
+
+        area.innerHTML = `
+          <div class="p-4 flex flex-col gap-4 h-full overflow-auto">
+            <div class="text-xs text-slate-400 font-medium">${t('diff_image_compare')}</div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 flex-1 min-h-[300px]">
+              <div class="flex flex-col items-center justify-center p-3 rounded-xl bg-slate-950/60 border border-indigo-500/30">
+                <div class="mb-2 text-xs font-bold text-indigo-400">
+                  ${t('diff_badge_ver')}${selectedDiffVersion} (${formatBytes(selObj ? selObj.size_bytes : 0)})
+                </div>
+                <div class="flex-1 flex items-center justify-center overflow-hidden max-h-[360px] w-full">
+                  <img src="${selUrl}" class="max-h-full max-w-full rounded-lg object-contain border border-slate-800 shadow-md" alt="Version #${selectedDiffVersion}">
+                </div>
+              </div>
+              <div class="flex flex-col items-center justify-center p-3 rounded-xl bg-slate-950/60 border border-slate-800">
+                <div class="mb-2 text-xs font-bold text-slate-300">
+                  ${t('diff_badge_current')} #${maxVer} (${formatBytes(curObj.size_bytes)})
+                </div>
+                <div class="flex-1 flex items-center justify-center overflow-hidden max-h-[360px] w-full">
+                  <img src="${curUrl}" class="max-h-full max-w-full rounded-lg object-contain border border-slate-800 shadow-md" alt="Current #${maxVer}">
+                </div>
+              </div>
+            </div>
+          </div>
+        `;
+        return;
+      }
+
+      // 2. Binary / Non-Text file
+      if (!isText) {
+        const rawEnc = encodeURIComponent(currentVersionsFileName);
+        const sizeDelta = selObj && curObj ? selObj.size_bytes - curObj.size_bytes : 0;
+        const deltaStr = sizeDelta === 0 ? '0 B' : (sizeDelta > 0 ? `+${formatBytes(sizeDelta)}` : `-${formatBytes(Math.abs(sizeDelta))}`);
+
+        area.innerHTML = `
+          <div class="flex flex-col items-center justify-center h-full p-8 text-center space-y-4">
+            <div class="text-4xl">📦</div>
+            <div class="text-slate-200 font-bold text-sm">${t('diff_binary_title')}</div>
+            <p class="text-slate-400 text-xs max-w-md leading-relaxed">${t('diff_binary_desc')}</p>
+            
+            <div class="grid grid-cols-2 gap-4 w-full max-w-lg mt-2 text-left text-xs font-mono">
+              <div class="p-3 rounded-xl bg-slate-950/70 border border-indigo-500/30">
+                <div class="font-bold text-indigo-400 mb-1">Phiên bản #${selectedDiffVersion}</div>
+                <div class="text-slate-400">Size: <strong class="text-white">${formatBytes(selObj ? selObj.size_bytes : 0)}</strong></div>
+                <div class="text-slate-500 text-[10px] truncate mt-1" title="${selObj ? selObj.manifest_id : ''}">Hash: ${selObj ? selObj.manifest_id.substring(0, 16) : ''}...</div>
+                <a href="/api/download?target=${rawEnc}&version=${selectedDiffVersion}" class="inline-block mt-2 px-3 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px]">Tải Bản #${selectedDiffVersion}</a>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-950/70 border border-slate-800">
+                <div class="font-bold text-slate-300 mb-1">Bản Hiện Tại #${maxVer}</div>
+                <div class="text-slate-400">Size: <strong class="text-white">${formatBytes(curObj.size_bytes)}</strong></div>
+                <div class="text-slate-500 text-[10px] truncate mt-1" title="${curObj.manifest_id}">Hash: ${curObj.manifest_id.substring(0, 16)}...</div>
+                <a href="/api/download?target=${rawEnc}&version=${maxVer}" class="inline-block mt-2 px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px]">Tải Bản #${maxVer}</a>
+              </div>
+            </div>
+
+            <div class="text-[11px] font-mono text-slate-400">
+              Độ lệch dung lượng: <span class="${sizeDelta >= 0 ? 'text-emerald-400' : 'text-rose-400'} font-bold">${deltaStr}</span>
+            </div>
+          </div>
+        `;
+        return;
+      }
+
+      // 3. Text file
+      area.innerHTML = `<div class="p-8 text-center text-slate-400 font-mono">${t('diff_loading')}</div>`;
+
+      try {
+        const rawEnc = encodeURIComponent(currentVersionsFileName);
+
+        if (!cachedVersionData.has(selectedDiffVersion)) {
+          const res = await fetch(`/api/download?target=${rawEnc}&version=${selectedDiffVersion}`);
+          if (!res.ok) throw new Error(`Could not fetch content for version #${selectedDiffVersion}`);
+          const text = await res.text();
+          cachedVersionData.set(selectedDiffVersion, text);
+        }
+        const textSelected = cachedVersionData.get(selectedDiffVersion);
+
+        if (!cachedVersionData.has(maxVer)) {
+          const res = await fetch(`/api/download?target=${rawEnc}&version=${maxVer}`);
+          if (!res.ok) throw new Error(`Could not fetch content for current version #${maxVer}`);
+          const text = await res.text();
+          cachedVersionData.set(maxVer, text);
+        }
+        const textCurrent = cachedVersionData.get(maxVer);
+
+        // Mode: selected content
+        if (diffViewMode === 'selected') {
+          inspectorCurrentText = textSelected;
+          if (copyBtn) copyBtn.classList.remove('hidden');
+          renderNumberedCode(area, textSelected, `#${selectedDiffVersion}`);
+          return;
+        }
+
+        // Mode: current content
+        if (diffViewMode === 'current') {
+          inspectorCurrentText = textCurrent;
+          if (copyBtn) copyBtn.classList.remove('hidden');
+          renderNumberedCode(area, textCurrent, `#${maxVer} (${t('rollback_latest_badge')})`);
+          return;
+        }
+
+        // Mode: diff
+        if (isLatest) {
+          if (currentVersionsList.length === 1) {
+            area.innerHTML = `
+              <div class="flex flex-col items-center justify-center h-full p-8 text-center text-slate-400">
+                <div class="text-3xl mb-2">ℹ️</div>
+                <div class="text-sm font-semibold text-slate-300">${t('diff_only_one')}</div>
+                <p class="text-xs text-slate-500 mt-1">Chuyển qua tab "Bản Đang Chọn" để xem toàn bộ nội dung.</p>
+              </div>
+            `;
+          } else {
+            area.innerHTML = `
+              <div class="flex flex-col items-center justify-center h-full p-8 text-center text-slate-400">
+                <div class="text-3xl mb-2">🔍</div>
+                <div class="text-sm font-semibold text-slate-300">Phiên bản #${selectedDiffVersion} đang là bản hiện tại (#${maxVer})</div>
+                <p class="text-xs text-slate-500 mt-1">Hãy bấm vào một phiên bản cũ hơn ở danh sách trên (ví dụ: Bản #${currentVersionsList[1] ? currentVersionsList[1].version : 1}) để so sánh sự khác biệt.</p>
+              </div>
+            `;
+          }
+          return;
+        }
+
+        const diffResult = computeLineDiff(textSelected, textCurrent);
+
+        if (diffResult.identical) {
+          area.innerHTML = `
+            <div class="flex flex-col items-center justify-center h-full p-8 text-center">
+              <div class="text-3xl mb-2">✅</div>
+              <div class="text-emerald-400 font-bold text-sm">${t('diff_identical')}</div>
+              <p class="text-xs text-slate-400 mt-1">Phiên bản #${selectedDiffVersion} và Bản hiện tại #${maxVer} có nội dung hoàn toàn trùng khớp.</p>
+            </div>
+          `;
+          return;
+        }
+
+        if (badgesContainer) {
+          badgesContainer.innerHTML = `
+            <span class="px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-bold">#${selectedDiffVersion}</span>
+            <span class="text-slate-500">vs</span>
+            <span class="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-bold">#${maxVer}</span>
+            <span class="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-bold text-[9px]">+${diffResult.stats.added}</span>
+            <span class="px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-400 font-bold text-[9px]">-${diffResult.stats.removed}</span>
+          `;
+        }
+
+        const rowsHtml = diffResult.lines.map(line => {
+          let rowClass = 'text-slate-300 hover:bg-slate-900/50';
+          let marker = ' ';
+          let markerClass = 'text-transparent';
+
+          if (line.type === 'del') {
+            rowClass = 'bg-rose-950/35 text-rose-200 border-l-2 border-rose-500';
+            marker = '-';
+            markerClass = 'text-rose-400 font-bold';
+          } else if (line.type === 'add') {
+            rowClass = 'bg-emerald-950/35 text-emerald-200 border-l-2 border-emerald-500';
+            marker = '+';
+            markerClass = 'text-emerald-400 font-bold';
+          }
+
+          const escaped = escapeHtml(line.text);
+
+          return `
+            <tr class="leading-5 ${rowClass}">
+              <td class="w-10 text-right pr-2 py-0.5 select-none text-[10px] text-slate-600 border-r border-slate-800/60 bg-slate-950/30">${line.oldNum || ''}</td>
+              <td class="w-10 text-right pr-2 py-0.5 select-none text-[10px] text-slate-600 border-r border-slate-800/60 bg-slate-950/30">${line.newNum || ''}</td>
+              <td class="w-6 text-center py-0.5 select-none text-[11px] ${markerClass}">${marker}</td>
+              <td class="py-0.5 pl-2 pr-4 font-mono text-[11px] whitespace-pre-wrap break-all">${escaped || '&nbsp;'}</td>
+            </tr>
+          `;
+        }).join('');
+
+        area.innerHTML = `
+          <div class="flex flex-col h-full">
+            <div class="flex items-center justify-between px-3 py-1.5 bg-slate-950/80 border-b border-slate-800/80 text-[11px] shrink-0">
+              <div class="flex items-center gap-4">
+                <div class="flex items-center gap-1.5">
+                  <span class="w-2.5 h-2.5 rounded-sm bg-rose-500 inline-block"></span>
+                  <span class="text-rose-300 font-medium">[-] ${t('diff_legend_del')} (#${maxVer})</span>
+                </div>
+                <div class="flex items-center gap-1.5">
+                  <span class="w-2.5 h-2.5 rounded-sm bg-emerald-500 inline-block"></span>
+                  <span class="text-emerald-300 font-medium">[+] ${t('diff_legend_add')} (#${selectedDiffVersion})</span>
+                </div>
+              </div>
+              <div class="text-[10px] text-slate-400 font-mono">
+                +${diffResult.stats.added} / -${diffResult.stats.removed} ${t('diff_line_diffs')}
+              </div>
+            </div>
+
+            <div class="flex-1 overflow-auto bg-[#070b14] text-xs font-mono select-text">
+              <table class="w-full border-collapse">
+                <tbody>
+                  ${rowsHtml}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        `;
+      } catch (err) {
+        area.innerHTML = `<div class="p-8 text-center text-rose-400">Error loading diff: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    function renderNumberedCode(container, text, label) {
+      const lines = (text || '').split(/\r?\n/);
+      const rowsHtml = lines.map((l, i) => `
+        <tr class="leading-5 text-slate-300 hover:bg-slate-900/40">
+          <td class="w-12 text-right pr-3 py-0.5 select-none text-[10px] text-slate-600 border-r border-slate-800/60 bg-slate-950/30">${i + 1}</td>
+          <td class="py-0.5 pl-3 pr-4 font-mono text-[11px] whitespace-pre-wrap break-all">${escapeHtml(l) || '&nbsp;'}</td>
+        </tr>
+      `).join('');
+
+      container.innerHTML = `
+        <div class="flex flex-col h-full">
+          <div class="flex items-center justify-between px-3 py-1.5 bg-slate-950/80 border-b border-slate-800/80 text-[11px] text-slate-400 shrink-0">
+            <span>Toàn bộ nội dung: <strong class="text-indigo-300">${label}</strong> (${lines.length} dòng)</span>
+          </div>
+          <div class="flex-1 overflow-auto bg-[#070b14] text-xs font-mono select-text">
+            <table class="w-full border-collapse">
+              <tbody>
+                ${rowsHtml}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+    }
+
+    function copyInspectorText() {
+      if (inspectorCurrentText) {
+        navigator.clipboard.writeText(inspectorCurrentText);
+        showToast(currentLang === 'vi' ? 'Đã Sao Chép' : 'Copied to Clipboard', currentLang === 'vi' ? 'Đã chép nội dung vào bộ nhớ tạm.' : 'Text copied.', 'success');
+      }
+    }
+
+    function executeSelectedVersionRollback() {
+      if (!currentVersionsList || selectedDiffVersion === null) return;
+      const selObj = currentVersionsList.find(v => v.version === selectedDiffVersion);
+      if (!selObj) return;
+      confirmRollbackVersion(encodeURIComponent(currentVersionsFileName), selectedDiffVersion, selObj.size_bytes);
     }
 
     function closeVersionsModal() {
       document.getElementById('versions-modal').classList.add('hidden');
+      currentVersionsFileName = null;
+      currentVersionsDiskPath = null;
+      selectedDiffVersion = null;
+      cachedVersionData.clear();
+      inspectorCurrentText = '';
+    }
+
+    function confirmRollbackVersion(rawEncodedName, targetVersion, sizeBytes) {
+      const name = decodeURIComponent(rawEncodedName);
+      const targetPathInfo = currentVersionsDiskPath ? `\n📍 ${currentVersionsDiskPath}` : '';
+      const promptTitle = `${t('rollback_confirm_title')} #${targetVersion}`;
+      const promptDesc = `${t('rollback_confirm_desc')}\n\n• ${currentLang === 'vi' ? 'Tập tin' : 'File'}: ${name} (${formatBytes(sizeBytes)})${targetPathInfo}`;
+      const btnText = currentLang === 'vi' ? '🔄 Xác Nhận Khôi Phục (Rollback)' : '🔄 Confirm Rollback';
+
+      showConfirm(promptTitle, promptDesc, async () => {
+        try {
+          const res = await fetch('/api/file/rollback', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: name,
+              version: targetVersion,
+              disk_path: currentVersionsDiskPath || null,
+            })
+          });
+          const data = await res.json();
+          if (data.ok) {
+            const diskMsg = data.applied_disk_path
+              ? ` (${t('rollback_disk_updated')} ${data.applied_disk_path})`
+              : '';
+            showToast(
+              t('rollback_success_title'),
+              `${data.message}${diskMsg}`,
+              'success'
+            );
+            // Refresh versions modal to display new version entry
+            await openVersionsModal(encodeURIComponent(name), currentVersionsDiskPath);
+            // Refresh background file list and stats
+            await refreshAll();
+          } else {
+            throw new Error(data.error || 'Failed to rollback version');
+          }
+        } catch (err) {
+          showToast('Rollback Error', err.message, 'error');
+        }
+      }, btnText, 'bg-emerald-600 hover:bg-emerald-500 shadow-lg shadow-emerald-600/30');
     }
 
     // ==========================================
+    // STORE PROMPT & URL ACTIONS (CONTEXT MENU)
+    // ==========================================
+    let pendingStorePath = null;
+
+    function showStorePromptModal(filePath, fileName, isNotTracked = false) {
+      pendingStorePath = filePath;
+      const modal = document.getElementById('store-prompt-modal');
+      const title = document.getElementById('store-prompt-title');
+      const msg = document.getElementById('store-prompt-message');
+      const pathEl = document.getElementById('store-prompt-path');
+      const btn = document.getElementById('store-prompt-submit-btn');
+
+      if (isNotTracked) {
+        title.textContent = t('store_prompt_not_tracked_title');
+        msg.textContent = t('store_prompt_not_tracked_desc');
+      } else {
+        title.textContent = t('store_prompt_add_title');
+        msg.textContent = t('store_prompt_add_desc');
+      }
+      pathEl.textContent = filePath;
+      btn.disabled = false;
+      btn.innerHTML = `<span>${t('store_prompt_btn')}</span>`;
+      modal.classList.remove('hidden');
+    }
+
+    function closeStorePromptModal() {
+      const modal = document.getElementById('store-prompt-modal');
+      modal.classList.add('hidden');
+      pendingStorePath = null;
+    }
+
+    async function executeStoreFromPrompt() {
+      if (!pendingStorePath) return;
+      const btn = document.getElementById('store-prompt-submit-btn');
+      btn.disabled = true;
+      btn.innerHTML = `<span>${t('store_prompt_storing')}</span>`;
+
+      // Determine appropriate logical name
+      let logicalName = null;
+      if (cachedWatcherStatus && cachedWatcherStatus.watched_dir) {
+        const watchDir = cachedWatcherStatus.watched_dir.replace(/\\/g, '/').toLowerCase();
+        const full = pendingStorePath.replace(/\\/g, '/');
+        if (full.toLowerCase().startsWith(watchDir)) {
+          logicalName = full.substring(watchDir.length).replace(/^\/+/, '');
+        }
+      }
+
+      const storedPath = pendingStorePath;
+      try {
+        const res = await fetch('/api/file/store-path', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: pendingStorePath, name: logicalName }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          closeStorePromptModal();
+          showToast(
+            currentLang === 'vi' ? 'Đã Lưu Vào Kho' : 'Stored in Vault',
+            `"${data.name}" (v${data.version}, ${formatBytes(data.size)})`,
+            'success'
+          );
+          await refreshAll();
+          switchTab('files');
+          openVersionsModal(data.name, storedPath);
+        } else {
+          throw new Error(data.error || 'Failed to store file');
+        }
+      } catch (err) {
+        showToast(currentLang === 'vi' ? 'Lỗi' : 'Error', err.message, 'error');
+        btn.disabled = false;
+        btn.innerHTML = `<span>${t('store_prompt_btn')}</span>`;
+      }
+    }
+
+    // ==========================================
+    // FOLDER ACTION HUB (CONTEXT MENU)
+    // ==========================================
+    let pendingFolderPath = null;
+    let pendingFolderName = null;
+
+    function showFolderActionModal(dirPath, dirName) {
+      pendingFolderPath = dirPath;
+      pendingFolderName = dirName;
+      const modal = document.getElementById('folder-action-modal');
+      const title = document.getElementById('folder-action-title');
+      const desc = document.getElementById('folder-action-desc');
+      const pathEl = document.getElementById('folder-action-path');
+      const statusBox = document.getElementById('folder-action-status');
+      const snapBtn = document.getElementById('folder-snapshot-btn');
+      const watchBtn = document.getElementById('folder-watch-btn');
+
+      if (title) title.textContent = t('folder_action_title');
+      if (desc) desc.textContent = t('folder_action_desc');
+      if (pathEl) pathEl.textContent = dirPath;
+      if (statusBox) {
+        statusBox.className = 'hidden p-3 rounded-xl text-xs font-mono';
+        statusBox.textContent = '';
+      }
+      if (snapBtn) {
+        snapBtn.disabled = false;
+        snapBtn.innerHTML = `<span>${t('folder_snapshot_btn')}</span>`;
+      }
+      if (watchBtn) {
+        watchBtn.disabled = false;
+        watchBtn.innerHTML = `<span>${t('folder_watch_btn')}</span>`;
+      }
+
+      modal.classList.remove('hidden');
+    }
+
+    function closeFolderActionModal() {
+      const modal = document.getElementById('folder-action-modal');
+      if (modal) modal.classList.add('hidden');
+      pendingFolderPath = null;
+      pendingFolderName = null;
+    }
+
+    async function executeFolderSnapshot() {
+      if (!pendingFolderPath) return;
+      const snapBtn = document.getElementById('folder-snapshot-btn');
+      const statusBox = document.getElementById('folder-action-status');
+
+      if (snapBtn) {
+        snapBtn.disabled = true;
+        snapBtn.innerHTML = `<span>⏳ ${currentLang === 'vi' ? 'Đang nạp & sao lưu...' : 'Ingesting folder...'}</span>`;
+      }
+
+      if (statusBox) {
+        statusBox.className = 'mt-2 p-3 rounded-xl text-xs font-mono bg-violet-950/40 border border-violet-500/20 text-violet-300';
+        statusBox.textContent = `==> ${currentLang === 'vi' ? 'Đang quét và lưu trữ các tập tin từ' : 'Scanning and ingesting files from'} "${pendingFolderPath}"...`;
+        statusBox.classList.remove('hidden');
+      }
+
+      try {
+        const res = await fetch('/api/folder/ingest', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            path: pendingFolderPath,
+            create_snapshot: true
+          }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          if (statusBox) {
+            statusBox.className = 'mt-2 p-3 rounded-xl text-xs font-mono bg-emerald-950/50 border border-emerald-500/30 text-emerald-300';
+            statusBox.innerHTML = `
+              <strong>✓ ${currentLang === 'vi' ? 'Hoàn tất sao lưu thư mục!' : 'Folder Ingestion Complete!'}</strong><br>
+              • ${currentLang === 'vi' ? 'Số tập tin đã lưu' : 'Files Stored'}: ${data.files_stored}<br>
+              • ${currentLang === 'vi' ? 'Tổng dung lượng' : 'Total Size'}: ${formatBytes(data.total_bytes)}<br>
+              • ${currentLang === 'vi' ? 'Nhãn Snapshot' : 'Snapshot Label'}: <span class="text-white font-bold">${escapeHtml(data.snapshot_label)}</span>
+            `;
+          }
+          showToast(
+            currentLang === 'vi' ? 'Sao Lưu Thư Mục Thành Công' : 'Folder Snapshot Created',
+            `"${data.folder}": ${data.files_stored} ${currentLang === 'vi' ? 'tập tin' : 'files'} (${formatBytes(data.total_bytes)})`,
+            'success'
+          );
+          await refreshAll();
+          setTimeout(() => {
+            closeFolderActionModal();
+            switchTab('snapshots');
+          }, 1800);
+        } else {
+          throw new Error(data.error || 'Failed to ingest folder');
+        }
+      } catch (err) {
+        if (statusBox) {
+          statusBox.className = 'mt-2 p-3 rounded-xl text-xs font-mono bg-rose-950/50 border border-rose-500/30 text-rose-300';
+          statusBox.textContent = 'Error: ' + err.message;
+        }
+        if (snapBtn) {
+          snapBtn.disabled = false;
+          snapBtn.innerHTML = `<span>${t('folder_snapshot_btn')}</span>`;
+        }
+        showToast(currentLang === 'vi' ? 'Lỗi Sao Lưu' : 'Folder Ingest Error', err.message, 'error');
+      }
+    }
+
+    async function executeFolderWatch() {
+      if (!pendingFolderPath) return;
+      const targetPath = pendingFolderPath;
+      closeFolderActionModal();
+      switchTab('watcher');
+      const input = document.getElementById('watcher-dir-input');
+      if (input) {
+        input.value = targetPath;
+      }
+      if (cachedWatcherStatus && cachedWatcherStatus.running) {
+        try {
+          await fetch('/api/watcher/stop', { method: 'POST' });
+        } catch (_) {}
+      }
+      try {
+        const debounce = parseInt(document.getElementById('watcher-debounce').value, 10) || 3;
+        const cooldown = parseInt(document.getElementById('watcher-cooldown').value, 10) || 60;
+        const throttle = parseInt(document.getElementById('watcher-throttle').value, 10) || 10;
+        const res = await fetch('/api/watcher/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dir: targetPath,
+            debounce_secs: debounce,
+            cooldown_secs: cooldown,
+            throttle_ms: throttle
+          })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          cachedWatcherStatus = data;
+          updateWatcherUi(data);
+          showToast(
+            currentLang === 'vi' ? 'Đang Giám Sát Thư Mục' : 'Auto-Vault Active',
+            `${currentLang === 'vi' ? 'Đang theo dõi tự động:' : 'Now watching:'} ${targetPath}`,
+            'success'
+          );
+        } else {
+          showToast('Watcher Error', data.error || 'Failed to start watcher', 'error');
+        }
+      } catch (err) {
+        showToast('Watcher Error', err.message, 'error');
+      }
+    }
+
+    function findMatchingFileInStore(targetPath) {
+      if (!cachedFilesList || cachedFilesList.length === 0) return null;
+      const clean = targetPath.replace(/\\/g, '/').toLowerCase();
+      const baseName = clean.split('/').filter(Boolean).pop();
+
+      // Look for candidates:
+      // 1. Exact match (e.g. clean === fn)
+      // 2. Suffix match with slash (e.g. "c:/.../comfyui/frontend/tailwind.config.js" ends with "/comfyui/frontend/tailwind.config.js")
+      // 3. Base filename match (e.g. fn === baseName or fn ends with "/" + baseName)
+      const candidates = cachedFilesList.filter(f => {
+        const fn = f.name.replace(/\\/g, '/').toLowerCase();
+        return clean === fn || clean.endsWith('/' + fn) || fn === baseName || fn.endsWith('/' + baseName);
+      });
+
+      if (candidates.length === 0) return null;
+
+      // Score candidates: prioritize longest matching suffix
+      candidates.sort((a, b) => {
+        const fnA = a.name.replace(/\\/g, '/').toLowerCase();
+        const fnB = b.name.replace(/\\/g, '/').toLowerCase();
+        const scoreA = clean.endsWith('/' + fnA) ? (1000 + fnA.length) : (fnA === baseName ? 100 : 10);
+        const scoreB = clean.endsWith('/' + fnB) ? (1000 + fnB.length) : (fnB === baseName ? 100 : 10);
+        return scoreB - scoreA;
+      });
+
+      return candidates[0];
+    }
+
+    function handleUrlAction() {
+      const params = new URLSearchParams(window.location.search);
+      const action = params.get('action');
+      const target = params.get('target');
+      if (!action || !target) return;
+
+      // Clean up URL query in address bar
+      window.history.replaceState({}, document.title, window.location.pathname);
+
+      const cleanPath = target.replace(/\\/g, '/');
+      const baseName = cleanPath.split('/').filter(Boolean).pop() || target;
+
+      if (action === 'store') {
+        showStorePromptModal(target, baseName, false);
+      } else if (action === 'view-history' || action === 'restore') {
+        const existing = findMatchingFileInStore(target);
+
+        if (existing) {
+          switchTab('files');
+          openVersionsModal(existing.name, target);
+        } else {
+          showStorePromptModal(target, baseName, true);
+        }
+      } else if (action === 'snapshot') {
+        showFolderActionModal(target, baseName);
+      } else if (action === 'watch') {
+        showFolderActionModal(target, baseName);
+        executeFolderWatch();
+      } else if (action === 'browse') {
+        const folderLower = baseName.toLowerCase();
+        const matched = cachedFilesList ? cachedFilesList.filter(f => {
+          const fn = f.name.replace(/\\/g, '/').toLowerCase();
+          return fn.startsWith(folderLower + '/') || fn.includes('/' + folderLower + '/') || fn === folderLower;
+        }) : [];
+
+        if (matched.length > 0) {
+          switchTab('files');
+          const searchInput = document.getElementById('file-search-input');
+          if (searchInput) {
+            searchInput.value = baseName;
+            filterFilesTable();
+          }
+          showToast(
+            currentLang === 'vi' ? 'Thư Mục Trong Kho' : 'Folder in Vault',
+            `${matched.length} ${currentLang === 'vi' ? 'tập tin thuộc' : 'files found in'} "${baseName}"`,
+            'info'
+          );
+        } else {
+          showFolderActionModal(target, baseName);
+        }
+      }
+    }
+
     // SNAPSHOT ACTIONS
     // ==========================================
     async function createSnapshot() {
@@ -2169,10 +3407,76 @@
           showToast('FSCK Issues Detected', `${rep.corrupted_chunks} corrupt, ${rep.missing_chunks} missing.`, 'error');
         }
       } catch (err) {
-        resultBox.className = 'mt-5 p-4 rounded-xl text-xs font-mono bg-rose-950/50 border border-rose-500/30 text-rose-300';
+      resultBox.className = 'mt-5 p-4 rounded-xl text-xs font-mono bg-rose-950/50 border border-rose-500/30 text-rose-300';
         resultBox.innerText = 'FSCK failed: ' + err.message;
         showToast('FSCK Error', err.message, 'error');
       } finally {
+        btn.disabled = false;
+      }
+    }
+
+    // ── Windows Context Menu (Shell Extension) ────────────────────────────────
+    let shellExtEnabled = false;
+
+    async function loadShellExtStatus() {
+      try {
+        const res = await fetch('/api/shell-ext/status');
+        const data = await res.json();
+        shellExtEnabled = !!data.enabled;
+        updateShellExtUI(shellExtEnabled);
+      } catch (_) {
+        updateShellExtUI(false);
+      }
+    }
+
+    function updateShellExtUI(enabled) {
+      const dot = document.getElementById('shell-ext-dot');
+      const statusText = document.getElementById('shell-ext-status-text');
+      const btn = document.getElementById('shell-ext-toggle-btn');
+      if (!dot || !statusText || !btn) return;
+
+      if (enabled) {
+        dot.className = 'w-2 h-2 rounded-full bg-emerald-400';
+        statusText.textContent = 'Enabled';
+        statusText.className = 'text-emerald-400';
+        btn.textContent = '✕ Disable';
+        btn.className = 'px-5 py-2 rounded-xl text-xs font-bold border transition-all cursor-pointer bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border-rose-500/30 min-w-[100px]';
+      } else {
+        dot.className = 'w-2 h-2 rounded-full bg-slate-500';
+        statusText.textContent = 'Disabled';
+        statusText.className = 'text-slate-400';
+        btn.textContent = '✓ Enable';
+        btn.className = 'px-5 py-2 rounded-xl text-xs font-bold border transition-all cursor-pointer bg-violet-500/15 hover:bg-violet-500/25 text-violet-300 border-violet-500/30 min-w-[100px]';
+      }
+      btn.disabled = false;
+    }
+
+    async function toggleShellExt() {
+      const btn = document.getElementById('shell-ext-toggle-btn');
+      const resultBox = document.getElementById('shell-ext-result');
+      btn.disabled = true;
+
+      const endpoint = shellExtEnabled ? '/api/shell-ext/disable' : '/api/shell-ext/enable';
+      try {
+        const res = await fetch(endpoint, { method: 'POST' });
+        const data = await res.json();
+        if (data.ok !== false) {
+          shellExtEnabled = !!data.enabled;
+          updateShellExtUI(shellExtEnabled);
+          const msg = shellExtEnabled
+            ? '✓ Context menu registered. Right-click any file or folder in Explorer to see the OOS-Lite submenu.'
+            : '✓ Context menu removed from Windows Explorer.';
+          resultBox.className = 'mt-4 p-3 rounded-xl text-xs font-mono bg-emerald-950/40 border border-emerald-500/20 text-emerald-300';
+          resultBox.textContent = msg;
+          resultBox.classList.remove('hidden');
+          showToast('Context Menu', shellExtEnabled ? 'Enabled in Explorer' : 'Disabled', shellExtEnabled ? 'success' : 'info');
+        } else {
+          throw new Error(data.error || 'Unknown error');
+        }
+      } catch (err) {
+        resultBox.className = 'mt-4 p-3 rounded-xl text-xs font-mono bg-rose-950/40 border border-rose-500/20 text-rose-300';
+        resultBox.textContent = 'Error: ' + err.message;
+        resultBox.classList.remove('hidden');
         btn.disabled = false;
       }
     }
@@ -2446,7 +3750,9 @@
 
     // Initial load & Polling
     applyTranslations();
-    refreshAll();
+    refreshAll().then(() => {
+      handleUrlAction();
+    });
     setInterval(fetchMountStatus, 4000);
     setInterval(fetchWatcherStatus, 4000);
   </script>

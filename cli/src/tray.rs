@@ -169,30 +169,7 @@ pub mod windows {
     }
 
     pub fn open_dashboard() {
-        let edge_paths = [
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-        ];
-        let profile_dir = std::env::temp_dir().join("oos_lite_desktop_profile");
-        let profile_arg = format!("--user-data-dir={}", profile_dir.display());
-        for p in &edge_paths {
-            if std::path::Path::new(p).exists() {
-                let _ = std::process::Command::new(p)
-                    .args([
-                        "--app=http://127.0.0.1:3000",
-                        &profile_arg,
-                        "--no-first-run",
-                        "--no-default-browser-check",
-                    ])
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .spawn();
-                return;
-            }
-        }
-        let _ = std::process::Command::new("explorer.exe")
-            .arg("http://127.0.0.1:3000")
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
+        crate::ui::open_desktop_window("http://127.0.0.1:3000");
     }
 
     static mut GLOBAL_TRAY_NID: Option<NOTIFYICONDATAW> = None;

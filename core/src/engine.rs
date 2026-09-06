@@ -1017,6 +1017,95 @@ impl StorageEngine {
         Ok(total_pruned)
     }
 
+    /// Rolls back a file to a specific historical version.
+    /// Creates a new version entry pointing to the target version's manifest
+    /// so the rollback is non-destructive, auditable, and instantaneous.
+    /// If `out_path` is provided, also writes the rolled-back content directly to disk.
+    pub fn rollback_file<P: AsRef<Path>>(
+        &self,
+        name: &str,
+        target_version: u32,
+        out_path: Option<P>,
+    ) -> Result<(u32, u64)> {
+        let name = name.trim();
+        validate_logical_name(name)?;
+
+        let _put_guard = self.put_lock.lock().map_err(|e| {
+            OosLiteError::Internal(format!("StorageEngine put_lock poisoned: {e}"))
+        })?;
+        let _op_guard = self.op_lock.read().map_err(|e| {
+            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
+        })?;
+
+        let obj_id = self.metadata_store.resolve_name(name)?.ok_or_else(|| {
+            OosLiteError::ObjectNotFound(format!("File '{}' not found in store", name))
+        })?;
+
+        let mut record = self.metadata_store.get_object(&obj_id)?.ok_or_else(|| {
+            OosLiteError::ObjectNotFound(format!("Object record {} missing", obj_id))
+        })?;
+
+        let target_entry = record
+            .versions
+            .iter()
+            .find(|v| v.version == target_version)
+            .cloned()
+            .ok_or_else(|| {
+                OosLiteError::ObjectNotFound(format!(
+                    "Version #{} not found for file '{}'",
+                    target_version, name
+                ))
+            })?;
+
+        let manifest = self
+            .metadata_store
+            .get_manifest(&target_entry.manifest_id)?
+            .ok_or_else(|| {
+                OosLiteError::Internal(format!(
+                    "Manifest {} missing for version #{}",
+                    target_entry.manifest_id, target_version
+                ))
+            })?;
+
+        // 1. Commit new version in vault
+        let new_version = record.versions.len() as u32 + 1;
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        record.latest_version = new_version;
+        record.versions.push(ObjectVersion {
+            version: new_version,
+            manifest_id: target_entry.manifest_id.clone(),
+            size_bytes: target_entry.size_bytes,
+            created_at: now_secs,
+        });
+
+        self.metadata_store.put_object(&record)?;
+        self.metadata_store.flush()?;
+
+        // 2. If out_path is provided, extract content directly to disk
+        let mut written_bytes = 0u64;
+        if let Some(ref path) = out_path {
+            let path = path.as_ref();
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            written_bytes = self.extract_manifest_to_file(&manifest, path)?;
+        }
+
+        info!(
+            name = %name,
+            target_version = target_version,
+            new_version = new_version,
+            out_path = ?out_path.as_ref().map(|p| p.as_ref().display().to_string()),
+            "Successfully rolled back file version"
+        );
+
+        Ok((new_version, written_bytes))
+    }
+
     pub fn segment_store(&self) -> &SegmentStore {
         &self.segment_store
     }

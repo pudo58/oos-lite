@@ -176,6 +176,13 @@ struct FileDeleteReq {
     name: String,
 }
 
+#[derive(Deserialize)]
+struct FileRollbackReq {
+    name: String,
+    version: u32,
+    disk_path: Option<String>,
+}
+
 fn json_response<T: Serialize>(data: &T) -> Response<std::io::Cursor<Vec<u8>>> {
     let body = serde_json::to_vec(data).unwrap_or_else(|_| b"{}".to_vec());
     let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
@@ -204,6 +211,90 @@ fn format_relative_time(ts_secs: u64) -> String {
         format!("{}h ago", diff / 3600)
     } else {
         format!("{}d ago", diff / 86400)
+    }
+}
+
+#[cfg(windows)]
+pub fn open_desktop_window(url: &str) {
+    let candidate_browsers = [
+        // Microsoft Edge (Pre-installed on Windows 10 & 11)
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        // Google Chrome
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        // Brave
+        r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+    ];
+
+    let app_arg = format!("--app={}", url);
+    let size_arg = "--window-size=1200,820";
+
+    // 1. Try explicit browser installation paths
+    for path in &candidate_browsers {
+        if std::path::Path::new(path).exists() {
+            if let Ok(_) = std::process::Command::new(path)
+                .args([&app_arg, size_arg, "--no-first-run", "--no-default-browser-check"])
+                .spawn()
+            {
+                return;
+            }
+        }
+    }
+
+    // 2. Try looking up in PATH
+    for cmd in &["msedge.exe", "msedge", "chrome.exe", "chrome", "brave.exe"] {
+        if let Ok(_) = std::process::Command::new(cmd)
+            .args([&app_arg, size_arg, "--no-first-run", "--no-default-browser-check"])
+            .spawn()
+        {
+            return;
+        }
+    }
+
+    // 3. Fallback: ShellExecuteW if no Chromium app mode is available
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "shell32")]
+    extern "system" {
+        fn ShellExecuteW(
+            hwnd: *mut std::ffi::c_void,
+            lpOperation: *const u16,
+            lpFile: *const u16,
+            lpParameters: *const u16,
+            lpDirectory: *const u16,
+            nShowCmd: i32,
+        ) -> *mut std::ffi::c_void;
+    }
+
+    fn to_wide(s: &str) -> Vec<u16> {
+        OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    let op = to_wide("open");
+    let target = to_wide(url);
+    unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            op.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, // SW_SHOWNORMAL
+        );
+    }
+}
+
+#[cfg(not(windows))]
+pub fn open_desktop_window(url: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
     }
 }
 
@@ -313,46 +404,7 @@ pub fn start_ui_server(
         let open_url = local_url.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(300));
-            #[cfg(target_os = "windows")]
-            {
-                let edge_paths = [
-                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-                    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-                ];
-                let mut opened = false;
-                if is_desktop {
-                    let profile_dir = std::env::temp_dir().join("oos_lite_desktop_profile");
-                    let profile_arg = format!("--user-data-dir={}", profile_dir.display());
-                    for p in &edge_paths {
-                        if std::path::Path::new(p).exists() {
-                            let _ = std::process::Command::new(p)
-                                .args([
-                                    &format!("--app={}", open_url),
-                                    "--window-size=1200,820",
-                                    &profile_arg,
-                                    "--no-first-run",
-                                    "--no-default-browser-check",
-                                ])
-                                .spawn();
-                            opened = true;
-                            break;
-                        }
-                    }
-                }
-                if !opened {
-                    let _ = std::process::Command::new("explorer.exe")
-                        .arg(&open_url)
-                        .spawn();
-                }
-            }
-            #[cfg(target_os = "macos")]
-            {
-                let _ = std::process::Command::new("open").arg(&open_url).spawn();
-            }
-            #[cfg(target_os = "linux")]
-            {
-                let _ = std::process::Command::new("xdg-open").arg(&open_url).spawn();
-            }
+            open_desktop_window(&open_url);
         });
     }
 
@@ -586,6 +638,141 @@ fn handle_request(
             }
         }
 
+        (Method::Post, "/api/file/store-path") => {
+            #[derive(serde::Deserialize)]
+            struct StorePathReq {
+                path: String,
+                name: Option<String>,
+            }
+            let mut body_str = String::new();
+            let _ = request.as_reader().read_to_string(&mut body_str);
+            let req_data: StorePathReq = match serde_json::from_str(&body_str) {
+                Ok(d) => d,
+                Err(e) => {
+                    let _ = request.respond(error_response(400, &format!("Invalid JSON: {}", e)));
+                    return Ok(());
+                }
+            };
+            let target_path = PathBuf::from(&req_data.path);
+            if !target_path.exists() {
+                let _ = request.respond(error_response(404, "Target file does not exist on disk"));
+                return Ok(());
+            }
+            if target_path.is_dir() {
+                let _ = request.respond(error_response(400, "Selected path is a folder. Please choose individual files, or use Auto-Vault to sync folders."));
+                return Ok(());
+            }
+            let fallback_name = target_path.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unnamed_file")
+                .to_string();
+            let file_name = req_data.name.as_deref().unwrap_or(&fallback_name);
+            match engine.put_file_named(file_name, &target_path) {
+                Ok(summary) => {
+                    let resp = serde_json::json!({
+                        "ok": true,
+                        "name": file_name,
+                        "version": summary.version,
+                        "size": summary.total_bytes,
+                        "chunks": summary.chunk_count,
+                        "dedup_chunks": summary.dedup_chunks,
+                        "message": format!("Successfully stored '{}' into Vault as version #{}", file_name, summary.version),
+                    });
+                    let _ = request.respond(json_response(&resp));
+                }
+                Err(e) => {
+                    let _ = request.respond(error_response(500, &format!("Failed to store file: {}", e)));
+                }
+            }
+        }
+
+        (Method::Post, "/api/folder/ingest") => {
+            #[derive(serde::Deserialize)]
+            struct FolderIngestReq {
+                path: String,
+                create_snapshot: Option<bool>,
+                snapshot_label: Option<String>,
+            }
+            let mut body_str = String::new();
+            let _ = request.as_reader().read_to_string(&mut body_str);
+            let req_data: FolderIngestReq = match serde_json::from_str(&body_str) {
+                Ok(d) => d,
+                Err(e) => {
+                    let _ = request.respond(error_response(400, &format!("Invalid JSON: {}", e)));
+                    return Ok(());
+                }
+            };
+            let folder_path = PathBuf::from(&req_data.path);
+            if !folder_path.is_dir() {
+                let _ = request.respond(error_response(400, "Selected path is not a valid directory"));
+                return Ok(());
+            }
+
+            let base_name = folder_path.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("folder")
+                .to_string();
+
+            fn walk_folder(dir: &Path, root: &Path, prefix: &str, out: &mut Vec<(PathBuf, String)>) {
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        let name = entry.file_name();
+                        let name_str = name.to_string_lossy();
+                        // Skip system and heavy build artifacts
+                        if name_str.starts_with('.') || name_str == "node_modules" || name_str == "target" || name_str == "dist" {
+                            continue;
+                        }
+                        if p.is_dir() {
+                            walk_folder(&p, root, prefix, out);
+                        } else if p.is_file() {
+                            if let Ok(rel) = p.strip_prefix(root) {
+                                let logical = format!("{}/{}", prefix, rel.to_string_lossy().replace('\\', "/"));
+                                out.push((p, logical));
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut files_to_ingest = Vec::new();
+            walk_folder(&folder_path, &folder_path, &base_name, &mut files_to_ingest);
+
+            let mut stored_count = 0usize;
+            let mut total_bytes = 0u64;
+            for (p, logical) in &files_to_ingest {
+                if let Ok(summary) = engine.put_file_named(logical, p) {
+                    stored_count += 1;
+                    total_bytes += summary.total_bytes;
+                }
+            }
+
+            let now_secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let snap_label = req_data.snapshot_label.unwrap_or_else(|| {
+                format!("snapshot_{}_{}", base_name, now_secs)
+            });
+
+            let mut snapshot_ok = false;
+            if req_data.create_snapshot.unwrap_or(true) {
+                if engine.create_snapshot(&snap_label).is_ok() {
+                    snapshot_ok = true;
+                }
+            }
+
+            let resp = serde_json::json!({
+                "ok": true,
+                "folder": base_name,
+                "files_stored": stored_count,
+                "total_bytes": total_bytes,
+                "snapshot_created": snapshot_ok,
+                "snapshot_label": snap_label,
+            });
+            let _ = request.respond(json_response(&resp));
+        }
+
         (Method::Get, "/api/download") => {
             let target = parsed_url.query_pairs().find(|(k, _)| k == "target").map(|(_, v)| v.replace('\\', "/"));
             let version = parsed_url
@@ -731,6 +918,63 @@ fn handle_request(
                         let _ = request.respond(error_response(400, &e.to_string()));
                     }
                 },
+                Err(e) => {
+                    let _ = request.respond(error_response(400, &format!("Invalid JSON: {}", e)));
+                }
+            }
+        }
+
+        (Method::Post, "/api/file/rollback") => {
+            let mut body = String::new();
+            let _ = request.as_reader().read_to_string(&mut body);
+            match serde_json::from_str::<FileRollbackReq>(&body) {
+                Ok(req) => {
+                    let disk_target: Option<PathBuf> = if let Some(ref dp) = req.disk_path {
+                        let p = PathBuf::from(dp);
+                        if !p.as_os_str().is_empty() {
+                            Some(p)
+                        } else {
+                            None
+                        }
+                    } else {
+                        // Try resolving via watcher directory
+                        let w_dir = watcher_ctrl.lock().ok().and_then(|w| w.watch_dir.clone());
+                        if let Some(ref wd) = w_dir {
+                            let candidate = wd.join(&req.name);
+                            if candidate.exists() || candidate.parent().map(|p| p.exists()).unwrap_or(false) {
+                                Some(candidate)
+                            } else {
+                                None
+                            }
+                        } else {
+                            let local = PathBuf::from(&req.name);
+                            if local.exists() {
+                                Some(local)
+                            } else {
+                                None
+                            }
+                        }
+                    };
+
+                    match engine.rollback_file(&req.name, req.version, disk_target.as_ref()) {
+                        Ok((new_version, written_bytes)) => {
+                            let applied_path_str = disk_target.map(|p| p.to_string_lossy().to_string());
+                            let resp = serde_json::json!({
+                                "ok": true,
+                                "name": req.name,
+                                "target_version": req.version,
+                                "new_version": new_version,
+                                "written_bytes": written_bytes,
+                                "applied_disk_path": applied_path_str,
+                                "message": format!("Successfully rolled back '{}' to version #{} (recorded as version #{})", req.name, req.version, new_version),
+                            });
+                            let _ = request.respond(json_response(&resp));
+                        }
+                        Err(e) => {
+                            let _ = request.respond(error_response(500, &format!("Rollback failed: {}", e)));
+                        }
+                    }
+                }
                 Err(e) => {
                     let _ = request.respond(error_response(400, &format!("Invalid JSON: {}", e)));
                 }
@@ -1042,6 +1286,57 @@ fn handle_request(
                 Err(e) => {
                     let _ = request.respond(error_response(500, &format!("Lỗi khi dọn dẹp phiên bản: {}", e)));
                 }
+            }
+        }
+
+        // ── Shell Extension (Context Menu) ─────────────────────────────────
+        (Method::Get, "/api/shell-ext/status") => {
+            #[cfg(windows)]
+            {
+                let enabled = crate::shell_ext::windows::is_registered();
+                let body = serde_json::json!({ "enabled": enabled });
+                let _ = request.respond(json_response(&body));
+            }
+            #[cfg(not(windows))]
+            {
+                let body = serde_json::json!({ "enabled": false, "unsupported": true });
+                let _ = request.respond(json_response(&body));
+            }
+        }
+        (Method::Post, "/api/shell-ext/enable") => {
+            #[cfg(windows)]
+            {
+                match crate::shell_ext::windows::register() {
+                    Ok(()) => {
+                        let body = serde_json::json!({ "ok": true, "enabled": true });
+                        let _ = request.respond(json_response(&body));
+                    }
+                    Err(e) => {
+                        let _ = request.respond(error_response(500, &format!("Failed to register context menu: {}", e)));
+                    }
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = request.respond(error_response(400, "Context menu only supported on Windows"));
+            }
+        }
+        (Method::Post, "/api/shell-ext/disable") => {
+            #[cfg(windows)]
+            {
+                match crate::shell_ext::windows::unregister() {
+                    Ok(()) => {
+                        let body = serde_json::json!({ "ok": true, "enabled": false });
+                        let _ = request.respond(json_response(&body));
+                    }
+                    Err(e) => {
+                        let _ = request.respond(error_response(500, &format!("Failed to remove context menu: {}", e)));
+                    }
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = request.respond(error_response(400, "Context menu only supported on Windows"));
             }
         }
 

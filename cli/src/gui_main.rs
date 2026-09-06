@@ -7,6 +7,7 @@ use oos_lite_core::StorageEngine;
 mod mount;
 mod ui;
 mod tray;
+mod shell_ext;
 
 fn show_alert(title: &str, message: &str) {
     #[cfg(windows)]
@@ -36,40 +37,7 @@ fn show_alert(title: &str, message: &str) {
 }
 
 pub fn open_browser_window(url: &str) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-        let edge_paths = [
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-        ];
-        let profile_dir = std::env::temp_dir().join("oos_lite_desktop_profile");
-        let profile_arg = format!("--user-data-dir={}", profile_dir.display());
-        for p in &edge_paths {
-            if std::path::Path::new(p).exists() {
-                let _ = std::process::Command::new(p)
-                    .args([
-                        &format!("--app={}", url),
-                        &profile_arg,
-                        "--no-first-run",
-                        "--no-default-browser-check",
-                    ])
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .spawn();
-                return;
-            }
-        }
-        let _ = std::process::Command::new("explorer.exe")
-            .arg(url)
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-    }
+    ui::open_desktop_window(url);
 }
 
 fn resolve_store_dir() -> PathBuf {
@@ -152,14 +120,18 @@ fn resolve_password(store_dir: &std::path::Path) -> Option<String> {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let no_open = args.iter().any(|a| a == "--no-open");
+
     let store_dir = resolve_store_dir();
     let password = resolve_password(&store_dir);
 
     // If port 3000 is already active, try to just focus the UI
     let test_stream = std::net::TcpStream::connect("127.0.0.1:3000");
     if test_stream.is_ok() {
-        // App is already running, open browser window directly
-        open_browser_window("http://127.0.0.1:3000");
+        if !no_open {
+            open_browser_window("http://127.0.0.1:3000");
+        }
         return;
     }
 
@@ -219,5 +191,7 @@ fn main() {
     // Spawn native Windows System Tray icon
     tray::windows::spawn_system_tray();
 
-    let _ = ui::start_ui_server(Arc::new(engine), "127.0.0.1", 3000, false, true);
+    if let Err(e) = ui::start_ui_server(Arc::new(engine), "127.0.0.1", 3000, no_open, true) {
+        show_alert("OOS-Lite Error", &format!("Không thể khởi chạy máy chủ giao diện:\n{}", e));
+    }
 }

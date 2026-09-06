@@ -37,7 +37,7 @@ jobs:
       - name: Create Standalone Binary ZIP Archive
         shell: pwsh
         run: |
-          Compress-Archive -Path target\release\oos-lite.exe, target\release\oos-lite-gui.exe, README.md, LICENSE-MIT -DestinationPath oos-lite-windows-x86_64.zip
+          Compress-Archive -Path target\release\oos-lite.exe, target\release\oos-lite-gui.exe, uninstall.bat, README.md, LICENSE-MIT -DestinationPath oos-lite-windows-x86_64.zip -Force
 
       - name: Compile Windows Installer with Inno Setup
         shell: pwsh
@@ -47,7 +47,8 @@ jobs:
       - name: Generate SHA-256 Checksums
         shell: pwsh
         run: |
-          $hashes = Get-FileHash -Algorithm SHA256 dist\OOS-Lite-Setup-v0.1.0.exe, oos-lite-windows-x86_64.zip
+          $setupExe = (Get-Item dist\OOS-Lite-Setup-*.exe | Select-Object -First 1).FullName
+          $hashes = Get-FileHash -Algorithm SHA256 $setupExe, oos-lite-windows-x86_64.zip
           $hashes | ForEach-Object { "$($_.Hash)  $($_.Path | Split-Path -Leaf)" } | Out-File -Encoding utf8 SHA256SUMS.txt
           Get-Content SHA256SUMS.txt
 
@@ -60,7 +61,7 @@ jobs:
           } elseif ("${{ inputs.tag_name }}" -ne "") {
             $tag = "${{ inputs.tag_name }}"
           } else {
-            $tag = "v0.1.0"
+            $tag = "v0.2.0"
           }
           echo "tag=$tag" >> $env:GITHUB_OUTPUT
 
@@ -68,24 +69,47 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.get_tag.outputs.tag }}
-          name: "OOS-Lite ${{ steps.get_tag.outputs.tag }} - Windows Versioned & Encrypted Drive"
+          name: "OOS-Lite ${{ steps.get_tag.outputs.tag }} - Version Diff Studio, In-Place Rollback & Native Desktop Experience"
           body: |
-            ## OOS-Lite v0.1.0 - Windows Versioned & Encrypted Drive
+            ## OOS-Lite ${{ steps.get_tag.outputs.tag }} - Version Diff Studio, In-Place Rollback & Native Desktop Experience
 
-            ### 🚀 What's New in v0.1.0:
-            - **Windows Versioned Drive (WebDAV Z:\)**: Transparent mount to Windows Explorer with zero custom kernel drivers required.
-            - **End-to-End Encryption**: XChaCha20-Poly1305 with BLAKE3 MAC, Argon2id key derivation, and atomic vault key management.
-            - **Auto-Vault & Live Sync**: Background real-time directory watcher with TOCTOU-safe locking, debounce, and automatic 3-tier reconciliation.
-            - **Desktop GUI & System Tray**: Native Windows tray integration, zero CMD console flash, folder tree explorer, and dual-language (EN/VI) support.
-            - **Data Integrity & Garbage Collection**: Mark-and-sweep GC and segment FSCK integrity validation.
+            ### 🚀 Key Features & Highlights:
+            - **Version Inspector & Diff Studio**:
+              - Real-time line-by-line diff comparison powered by an optimized Myers diff algorithm with prefix/suffix trimming.
+              - Visual color-coded diff table with dual line numbering (`[-] Red` for Current Version lines, `[+] Green` for Selected Historical Version lines).
+              - Stat badges tracking additions and deletions (`+X / -Y line differences`).
+              - Flexible 3-way mode switcher: `🔀 Line Diff`, `📄 Selected Version Content` (with line numbering and 1-click clipboard copy), and `📋 Current Version Content`.
+              - Visual side-by-side comparison for image files (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.svg`).
+              - File size and BLAKE3 hash delta inspection for non-text binary formats.
+
+            - **One-Click In-Place Rollback**:
+              - Direct in-place file restoration on disk without requiring manual file download and replacement.
+              - Non-destructive, auditable vault commits: rolling back creates a new forward version pointing to the target manifest, preserving full version history and audit trails.
+              - Instant rollback action buttons available directly inside both the version history table and the Inspector header.
+
+            - **Native Desktop Application Window**:
+              - Upgraded GUI launcher to run in standalone Chromium Application Mode (`--app`), eliminating browser address bars, navigation controls, bookmarks, and tabs.
+              - True native desktop window experience with dedicated title bar, custom app icon, standard Windows window controls (minimize, maximize, snap layout, close), and default 1200x820 sizing.
+              - Supported across Microsoft Edge (pre-installed on Windows 10/11), Google Chrome, and Brave.
+
+            - **Complete Multi-Tier Uninstallation System**:
+              - Automated process killer: cleanly terminates `oos-lite.exe` and `oos-lite-gui.exe`.
+              - Network port scavenger: frees TCP ports `3000` (Web Dashboard) and `8080` (WebDAV drive).
+              - Virtual drive unmapper: safely disconnects drive `Z:\` (`net use Z: /delete /y`).
+              - Clean Registry removal: unregisters all Windows Explorer context menu keys.
+              - Standalone single-click script (`uninstall.bat`) and integrated CLI commands (`oos-lite stop`, `oos-lite uninstall`).
+
+            - **Full Explorer Context Menu Integration**:
+              - Right-click integration for files and directories (Store in Vault, View Version History, Snapshot Folder, Auto-Vault Sync).
+              - Seamless handover from Windows Explorer right-click directly into the Desktop App and Version Diff Studio.
 
             ### 📦 Download Assets:
-            - **Installer (.exe)**: `OOS-Lite-Setup-v0.1.0.exe` (Recommended for Windows users)
-            - **Portable CLI/GUI (.zip)**: `oos-lite-windows-x86_64.zip`
+            - **Installer (.exe)**: `OOS-Lite-Setup-v0.2.0.exe` (Recommended Windows Installer with uninstaller & desktop shortcuts)
+            - **Portable CLI/GUI (.zip)**: `oos-lite-windows-x86_64.zip` (Standalone portable binaries & uninstall script)
             - **Integrity Checksums**: `SHA256SUMS.txt`
           draft: false
           prerelease: false
           files: |
-            dist/OOS-Lite-Setup-v0.1.0.exe
+            dist/OOS-Lite-Setup-*.exe
             oos-lite-windows-x86_64.zip
             SHA256SUMS.txt
