@@ -111,5 +111,6 @@ jobs:
           prerelease: false
           files: |
             dist/OOS-Lite-Setup-*.exe
-            oos-lite-windows-x86_64.zip
-            SHA256SUMS.txt
+            dist/oos-lite-windows-x86_64.zip
+            dist/oos-lite-linux-x86_64.tar.gz
+            dist/SHA256SUMS.txt
