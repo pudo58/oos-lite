@@ -135,10 +135,9 @@ impl Wal {
         self.checkpoint_lsn
     }
 
-    pub fn append_put_and_sync(&mut self, payload: WalPutPayload) -> Result<u64> {
+    pub fn append_put_and_sync(&mut self, payload: &WalPutPayload) -> Result<u64> {
         self.current_lsn += 1;
-        let record = WalRecord::new_put(self.current_lsn, payload);
-        let encoded = record.encode_with_vault(self.vault_key.as_deref())?;
+        let encoded = WalRecord::encode_put(self.current_lsn, payload, self.vault_key.as_deref())?;
 
         self.file.write_all(&encoded)?;
         self.file.sync_all()?;
@@ -238,11 +237,11 @@ mod tests {
         assert_eq!(wal.checkpoint_lsn(), 0);
 
         let p1 = sample_payload("file1.txt");
-        let lsn1 = wal.append_put_and_sync(p1).unwrap();
+        let lsn1 = wal.append_put_and_sync(&p1).unwrap();
         assert_eq!(lsn1, 1);
 
         let p2 = sample_payload("file2.txt");
-        let lsn2 = wal.append_put_and_sync(p2).unwrap();
+        let lsn2 = wal.append_put_and_sync(&p2).unwrap();
         assert_eq!(lsn2, 2);
 
         let records = wal.read_uncheckpointed_records().unwrap();
@@ -273,7 +272,7 @@ mod tests {
 
         let mut wal = Wal::open(&wal_dir).unwrap();
         let p = sample_payload("corrupt_test.txt");
-        wal.append_put_and_sync(p).unwrap();
+        wal.append_put_and_sync(&p).unwrap();
         drop(wal);
 
         // Corrupt a byte in the payload
@@ -298,7 +297,7 @@ mod tests {
 
         let mut wal = Wal::open(&wal_dir).unwrap();
         let p = sample_payload("tail_test.txt");
-        wal.append_put_and_sync(p).unwrap();
+        wal.append_put_and_sync(&p).unwrap();
         drop(wal);
 
         // Append incomplete header bytes at EOF (simulating crash mid-write)

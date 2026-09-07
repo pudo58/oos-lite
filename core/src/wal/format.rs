@@ -78,38 +78,34 @@ impl WalRecord {
         self.encode_with_vault(None)
     }
 
-    pub fn encode_with_vault(&self, vault_key: Option<&crate::crypto::VaultKey>) -> Result<Vec<u8>> {
+    pub fn encode_put(
+        lsn: u64,
+        put: &WalPutPayload,
+        vault_key: Option<&crate::crypto::VaultKey>,
+    ) -> Result<Vec<u8>> {
         let mut payload_buf = Vec::new();
-        let record_type = match &self.payload {
-            WalRecordPayload::PutObject(put) => {
-                let name_bytes = put.name.as_bytes();
-                payload_buf.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
-                payload_buf.extend_from_slice(name_bytes);
+        let name_bytes = put.name.as_bytes();
+        payload_buf.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+        payload_buf.extend_from_slice(name_bytes);
 
-                payload_buf.extend_from_slice(put.object_id.as_bytes());
-                payload_buf.extend_from_slice(&put.version.to_le_bytes());
+        payload_buf.extend_from_slice(put.object_id.as_bytes());
+        payload_buf.extend_from_slice(&put.version.to_le_bytes());
 
-                let manifest_bytes = put.manifest.to_bytes();
-                payload_buf.extend_from_slice(&(manifest_bytes.len() as u32).to_le_bytes());
-                payload_buf.extend_from_slice(&manifest_bytes);
+        let manifest_bytes = put.manifest.to_bytes();
+        payload_buf.extend_from_slice(&(manifest_bytes.len() as u32).to_le_bytes());
+        payload_buf.extend_from_slice(&manifest_bytes);
 
-                payload_buf.extend_from_slice(&(put.chunks.len() as u32).to_le_bytes());
-                for (chunk_id, chunk_data) in &put.chunks {
-                    payload_buf.extend_from_slice(chunk_id.as_bytes());
-                    payload_buf.extend_from_slice(&(chunk_data.len() as u32).to_le_bytes());
-                    payload_buf.extend_from_slice(chunk_data);
-                }
+        payload_buf.extend_from_slice(&(put.chunks.len() as u32).to_le_bytes());
+        for (chunk_id, chunk_data) in &put.chunks {
+            payload_buf.extend_from_slice(chunk_id.as_bytes());
+            payload_buf.extend_from_slice(&(chunk_data.len() as u32).to_le_bytes());
+            payload_buf.extend_from_slice(chunk_data);
+        }
 
-                if vault_key.is_some() {
-                    WalRecordType::EncryptedPutObject
-                } else {
-                    WalRecordType::PutObject
-                }
-            }
-            WalRecordPayload::Checkpoint(lsn) => {
-                payload_buf.extend_from_slice(&lsn.to_le_bytes());
-                WalRecordType::Checkpoint
-            }
+        let record_type = if vault_key.is_some() {
+            WalRecordType::EncryptedPutObject
+        } else {
+            WalRecordType::PutObject
         };
 
         let final_payload = if record_type == WalRecordType::EncryptedPutObject {
@@ -118,7 +114,7 @@ impl WalRecord {
             rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut nonce);
 
             let mut aad = [0u8; 9];
-            aad[0..8].copy_from_slice(&self.lsn.to_le_bytes());
+            aad[0..8].copy_from_slice(&lsn.to_le_bytes());
             aad[8] = record_type as u8;
 
             let ciphertext = vk.encrypt_chunk(&payload_buf, &nonce, &aad)?;
@@ -136,13 +132,36 @@ impl WalRecord {
 
         let mut record_buf = Vec::with_capacity(WAL_HEADER_SIZE + final_payload.len());
         record_buf.extend_from_slice(&WAL_MAGIC);
-        record_buf.extend_from_slice(&self.lsn.to_le_bytes());
+        record_buf.extend_from_slice(&lsn.to_le_bytes());
         record_buf.push(record_type as u8);
         record_buf.extend_from_slice(&payload_len.to_le_bytes());
         record_buf.extend_from_slice(&crc.to_le_bytes());
         record_buf.extend_from_slice(&final_payload);
 
         Ok(record_buf)
+    }
+
+    pub fn encode_with_vault(&self, vault_key: Option<&crate::crypto::VaultKey>) -> Result<Vec<u8>> {
+        match &self.payload {
+            WalRecordPayload::PutObject(put) => Self::encode_put(self.lsn, put, vault_key),
+            WalRecordPayload::Checkpoint(lsn) => {
+                let mut payload_buf = Vec::with_capacity(8);
+                payload_buf.extend_from_slice(&lsn.to_le_bytes());
+                let record_type = WalRecordType::Checkpoint;
+                let payload_len = payload_buf.len() as u32;
+                let crc = crc32fast::hash(&payload_buf);
+
+                let mut record_buf = Vec::with_capacity(WAL_HEADER_SIZE + payload_buf.len());
+                record_buf.extend_from_slice(&WAL_MAGIC);
+                record_buf.extend_from_slice(&self.lsn.to_le_bytes());
+                record_buf.push(record_type as u8);
+                record_buf.extend_from_slice(&payload_len.to_le_bytes());
+                record_buf.extend_from_slice(&crc.to_le_bytes());
+                record_buf.extend_from_slice(&payload_buf);
+
+                Ok(record_buf)
+            }
+        }
     }
 
     pub fn decode(buf: &[u8]) -> Result<(Self, usize)> {
@@ -210,15 +229,31 @@ impl WalRecord {
         let mut cursor = Cursor::new(plaintext_slice);
         let payload = match record_type {
             WalRecordType::PutObject | WalRecordType::EncryptedPutObject => {
+                let remaining = plaintext_slice.len().saturating_sub(cursor.position() as usize);
+                if remaining < 2 {
+                    return Err(OosLiteError::WalRecovery("Truncated WAL name length".into()));
+                }
                 let mut name_len_buf = [0u8; 2];
                 cursor.read_exact(&mut name_len_buf)?;
                 let name_len = u16::from_le_bytes(name_len_buf) as usize;
+
+                let remaining = plaintext_slice.len().saturating_sub(cursor.position() as usize);
+                if name_len > remaining {
+                    return Err(OosLiteError::WalRecovery(format!(
+                        "WAL name length {name_len} exceeds remaining payload {remaining}"
+                    )));
+                }
 
                 let mut name_buf = vec![0u8; name_len];
                 cursor.read_exact(&mut name_buf)?;
                 let name = String::from_utf8(name_buf).map_err(|e| {
                     OosLiteError::WalRecovery(format!("Invalid UTF-8 in WAL name: {e}"))
                 })?;
+
+                let remaining = plaintext_slice.len().saturating_sub(cursor.position() as usize);
+                if remaining < 16 + 4 + 4 {
+                    return Err(OosLiteError::WalRecovery("Truncated WAL object header".into()));
+                }
 
                 let mut oid_buf = [0u8; 16];
                 cursor.read_exact(&mut oid_buf)?;
@@ -232,16 +267,41 @@ impl WalRecord {
                 cursor.read_exact(&mut manifest_len_buf)?;
                 let manifest_len = u32::from_le_bytes(manifest_len_buf) as usize;
 
+                let remaining = plaintext_slice.len().saturating_sub(cursor.position() as usize);
+                if manifest_len > remaining {
+                    return Err(OosLiteError::WalRecovery(format!(
+                        "WAL manifest length {manifest_len} exceeds remaining payload {remaining}"
+                    )));
+                }
+
                 let mut manifest_buf = vec![0u8; manifest_len];
                 cursor.read_exact(&mut manifest_buf)?;
                 let manifest = Manifest::from_bytes(&manifest_buf)?;
+
+                let remaining = plaintext_slice.len().saturating_sub(cursor.position() as usize);
+                if remaining < 4 {
+                    return Err(OosLiteError::WalRecovery("Truncated WAL chunk count".into()));
+                }
 
                 let mut chunk_count_buf = [0u8; 4];
                 cursor.read_exact(&mut chunk_count_buf)?;
                 let chunk_count = u32::from_le_bytes(chunk_count_buf) as usize;
 
-                let mut chunks = Vec::with_capacity(chunk_count);
+                // Each chunk requires at least 32 bytes for ChunkId + 4 bytes for data_len = 36 bytes
+                let remaining = plaintext_slice.len().saturating_sub(cursor.position() as usize);
+                if chunk_count > remaining / 36 {
+                    return Err(OosLiteError::WalRecovery(format!(
+                        "WAL chunk count {chunk_count} exceeds payload capacity (remaining: {remaining} bytes)"
+                    )));
+                }
+
+                let mut chunks = Vec::with_capacity(chunk_count.min(1024));
                 for _ in 0..chunk_count {
+                    let remaining = plaintext_slice.len().saturating_sub(cursor.position() as usize);
+                    if remaining < 36 {
+                        return Err(OosLiteError::WalRecovery("Truncated WAL chunk entry".into()));
+                    }
+
                     let mut cid_buf = [0u8; 32];
                     cursor.read_exact(&mut cid_buf)?;
                     let chunk_id = ChunkId::from_raw(cid_buf);
@@ -249,6 +309,13 @@ impl WalRecord {
                     let mut data_len_buf = [0u8; 4];
                     cursor.read_exact(&mut data_len_buf)?;
                     let data_len = u32::from_le_bytes(data_len_buf) as usize;
+
+                    let remaining = plaintext_slice.len().saturating_sub(cursor.position() as usize);
+                    if data_len > remaining {
+                        return Err(OosLiteError::WalRecovery(format!(
+                            "WAL chunk data length {data_len} exceeds remaining payload {remaining}"
+                        )));
+                    }
 
                     let mut data = vec![0u8; data_len];
                     cursor.read_exact(&mut data)?;
@@ -265,6 +332,10 @@ impl WalRecord {
                 })
             }
             WalRecordType::Checkpoint => {
+                let remaining = plaintext_slice.len().saturating_sub(cursor.position() as usize);
+                if remaining < 8 {
+                    return Err(OosLiteError::WalRecovery("Truncated WAL checkpoint LSN".into()));
+                }
                 let mut lsn_buf = [0u8; 8];
                 cursor.read_exact(&mut lsn_buf)?;
                 WalRecordPayload::Checkpoint(u64::from_le_bytes(lsn_buf))

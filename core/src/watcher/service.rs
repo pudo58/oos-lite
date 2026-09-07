@@ -107,7 +107,7 @@ impl WatcherService {
                 // Keep watcher alive inside thread
                 let _watcher = watcher;
                 while t1_running.load(Ordering::Relaxed) {
-                    match rx.recv_timeout(Duration::from_millis(300)) {
+                    match rx.recv_timeout(Duration::from_millis(50)) {
                         Ok(Ok(event)) => {
                             Self::process_notify_event(
                                 event,
@@ -167,7 +167,7 @@ impl WatcherService {
                         &t2_pending_rename,
                     );
 
-                    thread::sleep(Duration::from_millis(200));
+                    thread::sleep(Duration::from_millis(50));
                 }
             })
             .map_err(|e| OosLiteError::Internal(format!("Failed to spawn watcher worker thread: {e}")))?;
@@ -366,15 +366,15 @@ impl WatcherService {
                     };
                     let logical_name = rel.to_string_lossy().replace('\\', "/");
 
-                    match engine.delete_file(&logical_name) {
-                        Ok(deleted) => {
-                            if deleted {
-                                info!(name = %logical_name, "Auto-Vault: Removed deleted file mapping");
+                    match engine.unbind_file(&logical_name) {
+                        Ok(unbound) => {
+                            if unbound {
+                                info!(name = %logical_name, "Auto-Vault: Unbound deleted file, preserving version history");
                                 let mut sync_lock = last_synced.lock().unwrap();
                                 sync_lock.remove(&logical_name);
                             }
                         }
-                        Err(e) => error!(name = %logical_name, error = %e, "Failed to delete file mapping"),
+                        Err(e) => error!(name = %logical_name, error = %e, "Failed to unbind file mapping"),
                     }
                 }
                 PendingAction::Rename { from, to } => {

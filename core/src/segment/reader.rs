@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use crate::chunk::ChunkId;
 use crate::crypto::VaultKey;
 use crate::error::{OosLiteError, Result};
-use super::format::{ChunkLocation, CompressionCodec, EncryptionScheme, RecordHeader};
+use super::format::{ChunkLocation, CompressionCodec, EncryptionScheme, RecordHeader, DEFAULT_MAX_SEGMENT_SIZE, RECORD_HEADER_SIZE};
 use super::writer::segment_file_name;
 
 pub const DEFAULT_MAX_OPEN_SEGMENTS: usize = 128;
@@ -117,6 +117,14 @@ impl SegmentReader {
         })?;
 
         // Read Record Header
+        let file_len = file.metadata()?.len();
+        if location.record_offset.saturating_add(RECORD_HEADER_SIZE as u64) > file_len {
+            return Err(OosLiteError::CorruptedSegment {
+                offset: location.record_offset,
+                reason: "Record offset exceeds segment file length".to_string(),
+            });
+        }
+
         file.seek(SeekFrom::Start(location.record_offset))?;
         let header = match RecordHeader::read_from(file)? {
             Some(h) => h,
@@ -134,6 +142,30 @@ impl SegmentReader {
                 reason: format!(
                     "Record payload length mismatch: index {}, header {}",
                     location.payload_len, header.payload_len
+                ),
+            });
+        }
+
+        if header.payload_len as u64 > DEFAULT_MAX_SEGMENT_SIZE {
+            return Err(OosLiteError::CorruptedSegment {
+                offset: location.record_offset,
+                reason: format!(
+                    "Record payload length {} exceeds maximum segment size {}",
+                    header.payload_len, DEFAULT_MAX_SEGMENT_SIZE
+                ),
+            });
+        }
+
+        let required_end = location
+            .record_offset
+            .saturating_add(RECORD_HEADER_SIZE as u64)
+            .saturating_add(header.payload_len as u64);
+        if required_end > file_len {
+            return Err(OosLiteError::CorruptedSegment {
+                offset: location.record_offset,
+                reason: format!(
+                    "Record total size (offset {} + payload {}) exceeds segment file length {}",
+                    location.record_offset, header.payload_len, file_len
                 ),
             });
         }

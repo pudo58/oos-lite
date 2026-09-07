@@ -59,10 +59,10 @@ pub fn validate_logical_name(name: &str) -> Result<()> {
         });
     }
 
-    if trimmed.contains('\0') || trimmed.contains('\r') || trimmed.contains('\n') {
+    if trimmed.contains('\0') || trimmed.contains('\r') || trimmed.contains('\n') || trimmed.contains(':') {
         return Err(OosLiteError::InvalidName {
             name: name.to_string(),
-            reason: "Logical file name cannot contain control characters".to_string(),
+            reason: "Logical file name cannot contain control characters or colons".to_string(),
         });
     }
 
@@ -80,6 +80,22 @@ pub fn validate_logical_name(name: &str) -> Result<()> {
                     name: name.to_string(),
                     reason: "Absolute paths not allowed in logical name".to_string(),
                 });
+            }
+            std::path::Component::Normal(os_str) => {
+                let comp_str = os_str.to_string_lossy();
+                let stem = comp_str.split('.').next().unwrap_or("").to_ascii_uppercase();
+                let is_dos_device = matches!(
+                    stem.as_str(),
+                    "CON" | "PRN" | "AUX" | "NUL"
+                        | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
+                        | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+                );
+                if is_dos_device {
+                    return Err(OosLiteError::InvalidName {
+                        name: name.to_string(),
+                        reason: format!("Reserved Windows device name '{stem}' not allowed in path components"),
+                    });
+                }
             }
             _ => {}
         }
@@ -100,15 +116,15 @@ pub fn validate_logical_name(name: &str) -> Result<()> {
 }
 
 /// Opens a file handle safely for reading and chunking.
-/// On Windows, opens with `FILE_SHARE_READ` (1) to prevent other processes
-/// from modifying or deleting the file during chunking, and to fail with
-/// `ERROR_SHARING_VIOLATION` (os error 32) if another process is actively writing.
+/// On Windows, opens with `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE` (1 | 2 | 4)
+/// to allow concurrent reads while other processes or test runners access the file,
+/// avoiding spurious OS error 32 (Sharing Violation).
 #[cfg(windows)]
 pub fn open_safe_read(path: &Path) -> std::io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
     OpenOptions::new()
         .read(true)
-        .share_mode(1)
+        .share_mode(1 | 2 | 4)
         .open(path)
 }
 
@@ -443,7 +459,11 @@ impl StorageEngine {
                         name, existing_id
                     ))
                 })?;
-                (existing_id, existing.versions.len() as u32 + 1)
+                let next_version = existing
+                    .latest_version
+                    .max(existing.versions.iter().map(|v| v.version).max().unwrap_or(0))
+                    + 1;
+                (existing_id, next_version)
             }
             None => (ObjectId::generate(), 1),
         };
@@ -454,21 +474,21 @@ impl StorageEngine {
             object_id,
             version,
             manifest: manifest.clone(),
-            chunks: new_chunks_for_wal.clone(),
+            chunks: new_chunks_for_wal,
         };
 
         let lsn = {
             let mut wal_guard = self.wal.lock().map_err(|e| {
                 OosLiteError::Internal(format!("WAL mutex poisoned: {e}"))
             })?;
-            wal_guard.append_put_and_sync(wal_payload)?
+            wal_guard.append_put_and_sync(&wal_payload)?
         };
 
         check_crash_point("after_wal_fsync");
 
         // Step 2: Write chunks into SegmentStore + sync directly from memory slices
         let mut new_chunks = 0;
-        for (_cid, chunk_data) in &new_chunks_for_wal {
+        for (_cid, chunk_data) in &wal_payload.chunks {
             let (_id, is_new) = self.segment_store.put_chunk(chunk_data)?;
             if is_new {
                 new_chunks += 1;
@@ -594,6 +614,23 @@ impl StorageEngine {
         let mut hasher = blake3::Hasher::new();
         let mut written_bytes = 0u64;
 
+        struct TmpFileGuard<'a> {
+            path: &'a Path,
+            active: bool,
+        }
+        impl<'a> Drop for TmpFileGuard<'a> {
+            fn drop(&mut self) {
+                if self.active {
+                    let _ = fs::remove_file(self.path);
+                }
+            }
+        }
+
+        let mut guard = TmpFileGuard {
+            path: &tmp_path,
+            active: true,
+        };
+
         {
             let mut out_file = OpenOptions::new()
                 .write(true)
@@ -613,7 +650,6 @@ impl StorageEngine {
 
         let actual_hash = hasher.finalize();
         if actual_hash.as_bytes() != &manifest.content_hash {
-            let _ = fs::remove_file(&tmp_path);
             return Err(OosLiteError::Internal(format!(
                 "Reconstructed file BLAKE3 mismatch: expected {}, got {}",
                 manifest.content_id(),
@@ -622,6 +658,7 @@ impl StorageEngine {
         }
 
         fs::rename(&tmp_path, out_path)?;
+        guard.active = false;
         Ok(written_bytes)
     }
 
@@ -914,6 +951,22 @@ impl StorageEngine {
         }
     }
 
+    /// Unbinds a file name from active tracking without deleting its ObjectRecord and history.
+    pub fn unbind_file(&self, name: &str) -> Result<bool> {
+        let _op_guard = self.op_lock.write().map_err(|e| {
+            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
+        })?;
+
+        let name = name.trim();
+        if let Some(object_id) = self.metadata_store.unbind_name(name)? {
+            self.metadata_store.flush()?;
+            info!(name = %name, object_id = %object_id, "Successfully unbound file (history preserved)");
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Deletes a snapshot by label.
     pub fn delete_snapshot(&self, label: &str) -> Result<bool> {
         let _op_guard = self.op_lock.write().map_err(|e| {
@@ -1068,7 +1121,10 @@ impl StorageEngine {
             })?;
 
         // 1. Commit new version in vault
-        let new_version = record.versions.len() as u32 + 1;
+        let new_version = record
+            .latest_version
+            .max(record.versions.iter().map(|v| v.version).max().unwrap_or(0))
+            + 1;
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()

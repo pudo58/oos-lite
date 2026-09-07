@@ -238,7 +238,7 @@ fn test_encrypted_wal_crash_recovery() {
             chunks: vec![(cid, content.clone())],
         };
 
-        wal.append_put_and_sync(wal_payload).unwrap();
+        wal.append_put_and_sync(&wal_payload).unwrap();
         // Drop without checkpointing
     }
 

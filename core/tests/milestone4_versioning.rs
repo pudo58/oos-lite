@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io::Write;
+use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 use tempfile::tempdir;
@@ -590,6 +591,194 @@ fn test_snapshot_restore_empty_target_dir_rejected() {
         engine.restore_snapshot("snap1", ""),
         Err(oos_lite_core::error::OosLiteError::InvalidName { .. })
     ));
+}
+
+#[test]
+fn test_version_increment_after_pruning_and_rollback() {
+    let dir = tempdir().unwrap();
+    let store_dir = dir.path().join("store");
+    let engine = StorageEngine::open(&store_dir).unwrap();
+
+    let sample_file = dir.path().join("source.txt");
+
+    // Put versions 1 through 5
+    for i in 1..=5 {
+        std::fs::write(&sample_file, format!("Version {i} content")).unwrap();
+        let summary = engine.put_file_named("data.txt", &sample_file).unwrap();
+        assert_eq!(summary.version, i);
+    }
+
+    // Prune to keep only 2 latest versions (4 and 5)
+    let pruned = engine.prune_file_versions("data.txt", 2).unwrap();
+    assert_eq!(pruned, 3);
+
+    let versions_after_prune = engine.get_versions("data.txt").unwrap();
+    assert_eq!(versions_after_prune.len(), 2);
+    assert_eq!(versions_after_prune[0].version, 4);
+    assert_eq!(versions_after_prune[1].version, 5);
+
+    // Put new version: must become version 6, NOT version 3!
+    std::fs::write(&sample_file, b"Version 6 content").unwrap();
+    let summary_v6 = engine.put_file_named("data.txt", &sample_file).unwrap();
+    assert_eq!(summary_v6.version, 6, "Version must be 6 after pruning, not reset to versions.len() + 1");
+
+    // Rollback to version 4: must become version 7!
+    let (rolled_ver, _) = engine.rollback_file("data.txt", 4, None::<&Path>).unwrap();
+    assert_eq!(rolled_ver, 7, "Rollback must increment beyond latest_version (7)");
+
+    let versions_final = engine.get_versions("data.txt").unwrap();
+    let version_numbers: Vec<u32> = versions_final.iter().map(|v| v.version).collect();
+    assert_eq!(version_numbers, vec![4, 5, 6, 7]);
+}
+
+#[test]
+fn test_windows_dos_device_names_and_ads_rejection() {
+    let dir = tempdir().unwrap();
+    let store_dir = dir.path().join("store");
+    let engine = StorageEngine::open(&store_dir).unwrap();
+
+    let sample_file = dir.path().join("source.txt");
+    std::fs::write(&sample_file, b"payload").unwrap();
+
+    let bad_names = vec![
+        "CON",
+        "con",
+        "aux.txt",
+        "PRN.docx",
+        "NUL",
+        "com1",
+        "COM9.log",
+        "lpt1",
+        "LPT3.data",
+        "subdir/nul",
+        "folder/aux.bin",
+        "file.txt:stream",
+        "test:ads",
+        "c:test.txt",
+    ];
+
+    for bad in bad_names {
+        let res = engine.put_file_named(bad, &sample_file);
+        assert!(
+            matches!(res, Err(oos_lite_core::error::OosLiteError::InvalidName { .. })),
+            "Expected InvalidName rejection for '{bad}', got: {:?}",
+            res
+        );
+    }
+}
+
+#[test]
+fn test_unbind_file_preserves_object_and_snapshot_history() {
+    let dir = tempdir().unwrap();
+    let store_dir = dir.path().join("store");
+    let engine = StorageEngine::open(&store_dir).unwrap();
+
+    let sample = dir.path().join("important.doc");
+    std::fs::write(&sample, b"Version 1 content").unwrap();
+    engine.put_file_named("docs/important.doc", &sample).unwrap();
+
+    std::fs::write(&sample, b"Version 2 updated content").unwrap();
+    engine.put_file_named("docs/important.doc", &sample).unwrap();
+
+    // Create a snapshot capturing docs/important.doc
+    engine.create_snapshot("release_backup").unwrap();
+
+    // Unbind file (simulating deletion in watched directory)
+    let unbound = engine.unbind_file("docs/important.doc").unwrap();
+    assert!(unbound);
+
+    // Active listing must no longer show docs/important.doc
+    let files = engine.list_files().unwrap();
+    assert!(!files.iter().any(|(name, _, _)| name == "docs/important.doc"));
+
+    // But restoring the snapshot must successfully recover the file and its exact content!
+    let restore_dir = dir.path().join("restored");
+    engine.restore_snapshot("release_backup", &restore_dir).unwrap();
+
+    let restored_file = restore_dir.join("docs").join("important.doc");
+    assert!(restored_file.exists());
+    assert_eq!(std::fs::read(&restored_file).unwrap(), b"Version 2 updated content");
+}
+
+#[test]
+fn test_wal_bounded_allocation_rejects_malicious_payload() {
+    use oos_lite_core::manifest::Manifest;
+    use oos_lite_core::wal::format::{WalRecord, WAL_MAGIC};
+
+    // Construct a crafted WAL record header with huge chunk count to test OOM defense
+    let mut payload = Vec::new();
+    let name_bytes = b"test.txt";
+    payload.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+    payload.extend_from_slice(name_bytes);
+
+    let object_id = oos_lite_core::object::ObjectId::generate();
+    payload.extend_from_slice(object_id.as_bytes());
+    payload.extend_from_slice(&1u32.to_le_bytes()); // version 1
+
+    let manifest = Manifest::new(vec![], 0, [0u8; 32]);
+    let manifest_bytes = manifest.to_bytes();
+    payload.extend_from_slice(&(manifest_bytes.len() as u32).to_le_bytes());
+    payload.extend_from_slice(&manifest_bytes);
+
+    // Malicious huge chunk count (e.g. 50,000,000 chunks) with only a few bytes in buffer
+    payload.extend_from_slice(&50_000_000u32.to_le_bytes());
+
+    let payload_len = payload.len() as u32;
+    let crc = crc32fast::hash(&payload);
+
+    let mut record_buf = Vec::new();
+    record_buf.extend_from_slice(&WAL_MAGIC);
+    record_buf.extend_from_slice(&1u64.to_le_bytes()); // LSN 1
+    record_buf.push(1u8); // PutObject
+    record_buf.extend_from_slice(&payload_len.to_le_bytes());
+    record_buf.extend_from_slice(&crc.to_le_bytes());
+    record_buf.extend_from_slice(&payload);
+
+    // Decode should cleanly fail with WalRecovery error, not crash with OOM!
+    let decode_result = WalRecord::decode(&record_buf);
+    assert!(
+        matches!(decode_result, Err(oos_lite_core::error::OosLiteError::WalRecovery(_))),
+        "Expected WalRecovery error on malicious chunk count, got: {:?}",
+        decode_result
+    );
+}
+
+#[test]
+fn test_no_leaked_tmp_files_on_extract_error() {
+    use oos_lite_core::chunk::ChunkId;
+    use oos_lite_core::manifest::Manifest;
+
+    let dir = tempdir().unwrap();
+    let store_dir = dir.path().join("store");
+    let engine = StorageEngine::open(&store_dir).unwrap();
+
+    let out_dir = dir.path().join("output");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let target_out = out_dir.join("corrupted.bin");
+
+    // Create a manifest with a non-existent chunk ID
+    let missing_chunk = ChunkId::from_data(b"missing chunk that was never stored");
+    let bad_manifest = Manifest::new(vec![missing_chunk], 35, [0u8; 32]);
+
+    let res = engine.extract_manifest_to_file(&bad_manifest, &target_out);
+    assert!(res.is_err());
+
+    // Inspect directory: there must be NO leftover .tmp.* files!
+    let entries: Vec<_> = std::fs::read_dir(&out_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+
+    let tmp_files: Vec<_> = entries
+        .iter()
+        .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+        .collect();
+
+    assert!(
+        tmp_files.is_empty(),
+        "Leaked temporary files found after extract error: {:?}",
+        tmp_files
+    );
 }
 
 

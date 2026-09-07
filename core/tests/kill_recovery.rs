@@ -258,7 +258,7 @@ fn test_milestone5_c_corrupted_wal_record_detected() {
         chunks: vec![(cid, chunk_data)],
     };
 
-    wal.append_put_and_sync(payload).unwrap();
+    wal.append_put_and_sync(&payload).unwrap();
     drop(wal);
 
     // Corrupt 1 byte in the WAL payload on disk
