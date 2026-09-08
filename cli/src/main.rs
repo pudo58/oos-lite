@@ -5,6 +5,7 @@ use tracing::info;
 use oos_lite_core::StorageEngine;
 
 mod ui;
+mod share;
 mod mount;
 mod tray;
 mod shell_ext;

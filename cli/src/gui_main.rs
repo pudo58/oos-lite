@@ -6,6 +6,7 @@ use oos_lite_core::StorageEngine;
 
 mod mount;
 mod ui;
+mod share;
 mod tray;
 mod shell_ext;
 
@@ -121,6 +122,24 @@ fn resolve_password(store_dir: &std::path::Path) -> Option<String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    
+    // Intercept context-menu commands to avoid flashing console window
+    #[cfg(windows)]
+    if args.len() >= 4 && args[1] == "context-menu" {
+        let action = &args[2];
+        let path = &args[3];
+        match action.as_str() {
+            "store-file" => crate::shell_ext::windows::handle_store_file(path),
+            "view-history" => crate::shell_ext::windows::handle_view_history(path),
+            "snapshot" => crate::shell_ext::windows::handle_snapshot(path),
+            "restore" => crate::shell_ext::windows::handle_restore(path),
+            "watch" => crate::shell_ext::windows::handle_watch(path),
+            "browse" => crate::shell_ext::windows::handle_browse(path),
+            _ => {}
+        }
+        return;
+    }
+
     let no_open = args.iter().any(|a| a == "--no-open");
 
     let store_dir = resolve_store_dir();

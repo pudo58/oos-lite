@@ -4,8 +4,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
-use tracing::error;
+use tracing::{info, error};
 use url::Url;
+use std::sync::OnceLock;
+
+static UI_ACTIONS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
 use oos_lite_core::StorageEngine;
 
@@ -306,8 +309,14 @@ pub fn start_ui_server(
     is_desktop: bool,
 ) -> anyhow::Result<()> {
     let addr = format!("{}:{}", host, port);
+    UI_ACTIONS.get_or_init(|| Mutex::new(Vec::new()));
     let server = Server::http(&addr)
         .map_err(|e| anyhow::anyhow!("Failed to bind UI server on {}: {}", addr, e))?;
+
+    let vault_dir = engine.root_dir().to_path_buf();
+    let manager = crate::share::ShareManager::new(&vault_dir);
+    crate::share::ShareManager::spawn_tunnel(3001, manager.public_url.clone(), vault_dir);
+    crate::share::ShareManager::start_public_server(engine.clone(), manager.clone(), 3001);
 
     let local_url = if host == "0.0.0.0" {
         println!("⚠️  SECURITY WARNING: Bound to 0.0.0.0 - Web UI is exposed to LAN without auth!");
@@ -411,12 +420,14 @@ pub fn start_ui_server(
     let server = Arc::new(server);
 
     for request in server.incoming_requests() {
-        let engine_clone = Arc::clone(&engine);
-        let mount_ctrl_clone = Arc::clone(&mount_ctrl);
-        let watcher_ctrl_clone = Arc::clone(&watcher_ctrl);
+        let engine_clone = engine.clone();
+        let mount_ctrl_clone = mount_ctrl.clone();
+        let watcher_ctrl_clone = watcher_ctrl.clone();
+        let manager_clone = manager.clone();
+
         std::thread::spawn(move || {
-            if let Err(e) = handle_request(engine_clone, mount_ctrl_clone, watcher_ctrl_clone, request) {
-                error!("Request error: {:?}", e);
+            if let Err(e) = handle_request(engine_clone, mount_ctrl_clone, watcher_ctrl_clone, manager_clone, request) {
+                tracing::error!("Request error: {:?}", e);
             }
         });
     }
@@ -426,7 +437,7 @@ pub fn start_ui_server(
 
 pub fn is_host_allowed(host_val: &str) -> bool {
     let host_domain = host_val.split(':').next().unwrap_or("").trim();
-    matches!(host_domain, "127.0.0.1" | "localhost" | "")
+    host_domain == "localhost" || host_domain == "127.0.0.1" || host_domain == "0.0.0.0"
 }
 
 pub fn is_origin_allowed(origin: &str) -> bool {
@@ -443,6 +454,7 @@ fn handle_request(
     engine: Arc<StorageEngine>,
     mount_ctrl: Arc<Mutex<MountController>>,
     watcher_ctrl: Arc<Mutex<WatcherController>>,
+    manager: crate::share::ShareManager,
     mut request: tiny_http::Request,
 ) -> anyhow::Result<()> {
     let parsed_url = Url::parse(&format!("http://localhost{}", request.url()))?;
@@ -486,6 +498,31 @@ fn handle_request(
             let ct = Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap();
             let resp = Response::from_string(INDEX_HTML).with_header(ct);
             let _ = request.respond(resp);
+        }
+
+        (Method::Post, "/api/ui/action") => {
+            let mut content = String::new();
+            if let Ok(_) = request.as_reader().read_to_string(&mut content) {
+                if let Some(mutex) = UI_ACTIONS.get() {
+                    if let Ok(mut queue) = mutex.lock() {
+                        queue.push(content);
+                    }
+                }
+            }
+            let _ = request.respond(Response::from_string("{\"status\":\"ok\"}"));
+        }
+
+        (Method::Get, "/api/ui/actions") => {
+            let mut actions = Vec::new();
+            if let Some(mutex) = UI_ACTIONS.get() {
+                if let Ok(mut queue) = mutex.lock() {
+                    actions = queue.clone();
+                    queue.clear();
+                }
+            }
+            let json = serde_json::to_string(&actions).unwrap_or_else(|_| "[]".to_string());
+            let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+            let _ = request.respond(Response::from_string(json).with_header(ct));
         }
 
         (Method::Get, "/api/stats") => {
@@ -898,6 +935,63 @@ fn handle_request(
                 Err(e) => {
                     let _ = request.respond(error_response(400, &format!("Invalid JSON: {}", e)));
                 }
+            }
+        }
+
+        (Method::Post, "/api/file/delete_prefix") => {
+            let mut body = String::new();
+            let _ = request.as_reader().read_to_string(&mut body);
+            match serde_json::from_str::<FileDeleteReq>(&body) {
+                Ok(req) => match engine.delete_prefix(&req.name) {
+                    Ok(count) => {
+                        let resp = SuccessResponse {
+                            ok: count > 0,
+                            message: Some(format!("Deleted {} items", count)),
+                            count: Some(count),
+                        };
+                        let _ = request.respond(json_response(&resp));
+                    }
+                    Err(e) => {
+                        error!("Failed to delete prefix: {}", e);
+                        let _ = request.respond(error_response(500, &format!("{}", e)));
+                    }
+                },
+                Err(_) => {
+                    let _ = request.respond(error_response(400, "Invalid request"));
+                }
+            }
+        }
+
+        (Method::Post, "/api/share/create") => {
+            #[derive(Deserialize)]
+            struct CreateReq { path: String, expires_in: u64 }
+            let mut body = String::new();
+            let _ = request.as_reader().read_to_string(&mut body);
+            if let Ok(req) = serde_json::from_str::<CreateReq>(&body) {
+                let info = manager.add_share(req.path, req.expires_in);
+                let _ = request.respond(json_response(&info));
+            } else {
+                let _ = request.respond(error_response(400, "Invalid JSON"));
+            }
+        }
+        (Method::Get, "/api/share/public_url") => {
+            let p = manager.public_url.read().unwrap_or_else(|e| e.into_inner());
+            let url = p.as_ref().map(|s| s.as_str()).unwrap_or("");
+            let _ = request.respond(json_response(&serde_json::json!({"url": url})));
+        }
+        (Method::Get, "/api/share/list") => {
+            let _ = request.respond(json_response(&manager.list_shares()));
+        }
+        (Method::Post, "/api/share/revoke") => {
+            #[derive(Deserialize)]
+            struct RevokeReq { id: String }
+            let mut body = String::new();
+            let _ = request.as_reader().read_to_string(&mut body);
+            if let Ok(req) = serde_json::from_str::<RevokeReq>(&body) {
+                let ok = manager.revoke_share(&req.id);
+                let _ = request.respond(json_response(&serde_json::json!({"ok": ok})));
+            } else {
+                let _ = request.respond(error_response(400, "Invalid JSON"));
             }
         }
 

@@ -1059,7 +1059,52 @@
   <!-- ========================================================================= -->
   <!-- JAVASCRIPT APP LOGIC -->
   <!-- ========================================================================= -->
+
   <script>
+    window.copyToClipboard = async function(text, btn) {
+      try {
+          if (navigator.clipboard && window.isSecureContext) {
+              await navigator.clipboard.writeText(text);
+          } else {
+              let textArea = document.createElement("textarea");
+              textArea.value = text;
+              textArea.style.position = "fixed";
+              textArea.style.left = "-999999px";
+              textArea.style.top = "-999999px";
+              document.body.appendChild(textArea);
+              textArea.focus();
+              textArea.select();
+              document.execCommand("copy");
+              textArea.remove();
+          }
+          if (typeof showToast === 'function') {
+              showToast("Thành công", "Đã copy vào bộ nhớ tạm", "success");
+          }
+          if (btn) {
+              let old = btn.innerHTML;
+              btn.innerHTML = `<svg class="w-4 h-4 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>`;
+              setTimeout(() => btn.innerHTML = old, 2000);
+          }
+      } catch (err) {
+          if (typeof showToast === 'function') {
+              showToast("Lỗi", "Không thể copy", "error");
+          } else {
+              alert("Lỗi copy: " + err);
+          }
+      }
+    };
+
+    window.togglePwd = function(inputId, btn) {
+      let input = document.getElementById(inputId);
+      if (input.type === "password") {
+        input.type = "text";
+        btn.innerHTML = `<svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.29 3.29m0 0a10.05 10.05 0 015.71-1.58c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0l-3.29-3.29"/></svg>`;
+      } else {
+        input.type = "password";
+        btn.innerHTML = `<svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>`;
+      }
+    };
+
     const i18n = {
       vi: {
       "app_subtitle": "Động cơ lưu trữ & ổ đĩa khử trùng lặp dữ liệu",
@@ -1539,9 +1584,13 @@
     }
 
     // Confirmation Modal (Replaces native confirm)
-    function showConfirm(title, message, onConfirm, btnText = 'Confirm', btnClass = 'bg-rose-600 hover:bg-rose-500') {
+    function showConfirm(title, message, onConfirm, btnText = 'Confirm', btnClass = 'bg-rose-600 hover:bg-rose-500', isHtml = false) {
       document.getElementById('confirm-title').innerText = title;
-      document.getElementById('confirm-message').innerText = message;
+      if (isHtml) {
+        document.getElementById('confirm-message').innerHTML = message;
+      } else {
+        document.getElementById('confirm-message').innerText = message;
+      }
       const btn = document.getElementById('confirm-execute-btn');
       if (btn) {
         btn.innerText = btnText;
@@ -1865,8 +1914,9 @@
                   <span class="font-semibold text-slate-100 group-hover:text-indigo-300 transition-colors truncate">${escapeHtml(sub.name)}</span>
                   <span class="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700 font-mono shrink-0">${childCount} ${t('items')}</span>
                 </div>
-                <div class="text-[11px] text-slate-400 font-mono shrink-0 ml-3">
-                  ${formatBytes(sub.totalSize)}
+                <div class="text-[11px] text-slate-400 font-mono shrink-0 ml-3 flex items-center space-x-3">
+                  <span>${formatBytes(sub.totalSize)}</span>
+                  <button onclick="event.stopPropagation(); confirmDeleteFolder('${encodeURIComponent(sub.fullPath)}')" class="px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 text-[10px] transition-colors uppercase font-bold" title="Delete Folder">Xóa</button>
                 </div>
               </div>
               ${isExpanded ? `
@@ -1895,6 +1945,7 @@
                   <button onclick="openPreviewModal('${encodeURIComponent(file.name)}', ${file.size_bytes})" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] transition-colors cursor-pointer">${t('action_preview')}</button>
                   <button onclick="openVersionsModal('${encodeURIComponent(file.name)}')" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-indigo-300 text-[11px] transition-colors cursor-pointer">${t('action_versions')}</button>
                   <a href="/api/download?target=${encodeURIComponent(file.name)}" class="px-2.5 py-1 rounded-lg bg-indigo-600/80 hover:bg-indigo-600 text-white text-[11px] transition-colors">${t('action_download')}</a>
+                  <button onclick="createShareLink('${encodeURIComponent(file.name)}')" class="px-2.5 py-1 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 text-[11px] transition-colors cursor-pointer">Share</button>
                   <button onclick="confirmDeleteFile('${encodeURIComponent(file.name)}')" class="px-2 py-1 rounded-lg bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 text-[11px] transition-colors cursor-pointer">${t('action_delete')}</button>
                 </div>
               </div>
@@ -1969,6 +2020,7 @@
               <button onclick="openPreviewModal('${encodeURIComponent(f.name)}', ${f.size_bytes})" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors cursor-pointer">${t('action_preview')}</button>
               <button onclick="openVersionsModal('${encodeURIComponent(f.name)}')" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-indigo-300 transition-colors cursor-pointer">${t('action_versions')}</button>
               <a href="/api/download?target=${encodeURIComponent(f.name)}" class="px-2.5 py-1 rounded-lg bg-indigo-600/80 hover:bg-indigo-600 text-white transition-colors">${t('action_download')}</a>
+              <button onclick="createShareLink('${encodeURIComponent(f.name)}')" class="px-2.5 py-1 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 transition-colors cursor-pointer text-[11px]">Share</button>
               <button onclick="confirmDeleteFile('${encodeURIComponent(f.name)}')" class="px-2 py-1 rounded-lg bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 text-[11px] transition-colors cursor-pointer">${t('action_delete')}</button>
             </td>
           </tr>
@@ -1995,6 +2047,7 @@
             <div class="flex items-center justify-between border-t border-slate-800/80 pt-2 text-xs">
               <button onclick="openPreviewModal('${encodeURIComponent(f.name)}', ${f.size_bytes})" class="text-indigo-400 hover:underline cursor-pointer">${t('action_preview')}</button>
               <div class="space-x-1">
+                <button onclick="createShareLink('${encodeURIComponent(f.name)}')" class="px-2 py-0.5 rounded bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/40 text-[11px] cursor-pointer">Share</button>
                 <a href="/api/download?target=${encodeURIComponent(f.name)}" class="px-2 py-0.5 rounded bg-indigo-600/80 hover:bg-indigo-600 text-white text-[11px]">${t('action_download')}</a>
                 <button onclick="confirmDeleteFile('${encodeURIComponent(f.name)}')" class="px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 text-[11px] cursor-pointer">${t('action_delete')}</button>
               </div>
@@ -3315,8 +3368,111 @@
     }
 
     // ==========================================
+    // SECURE DROP / OOS-SHARE
+    // ==========================================
+    async function createShareLink(rawName) {
+      const name = decodeURIComponent(rawName);
+      let htmlForm = `
+        <div class="text-left space-y-4 mt-4">
+           <div><span class="text-slate-400 block text-xs mb-1">Thời gian tồn tại:</span>
+           <select id="share-expiry" class="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm text-slate-300">
+             <option value="3600">1 Giờ</option>
+             <option value="86400">1 Ngày</option>
+             <option value="604800">7 Ngày</option>
+             <option value="0">Không giới hạn</option>
+           </select></div>
+        </div>
+      `;
+      showConfirm("Thiết lập chia sẻ", htmlForm, async () => {
+          const exp = parseInt(document.getElementById("share-expiry").value);
+          const res = await fetch("/api/share/create", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: name, expires_in: exp })
+          });
+          const data = await res.json();
+          
+          const localLink = `http://${window.location.hostname}:3001/s/${data.id}`;
+          
+          let modalHtml = `
+            <div class="text-left space-y-4 mt-4">
+               <div class="text-xs text-amber-400 bg-amber-900/30 border border-amber-500/30 p-2 rounded flex items-start gap-2">
+                  <svg class="w-4 h-4 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                  <span><b>Lưu ý quan trọng:</b> Tuyệt đối KHÔNG tắt ứng dụng OOS-Lite này trong khi đang chia sẻ file, nếu không người nhận sẽ bị mất kết nối!</span>
+               </div>
+               
+               <div><span class="text-slate-400 block text-xs mb-1">Mật khẩu tải file:</span>
+               <div class="flex w-full bg-slate-900 border border-slate-700 rounded overflow-hidden">
+                 <input type="password" id="pwd-${data.id}" readonly value="${data.token}" class="w-full bg-transparent p-2 text-lg font-mono font-bold text-indigo-300 outline-none text-center tracking-widest"/>
+                 <button onclick="togglePwd('pwd-${data.id}', this)" class="p-2 hover:bg-slate-700 text-slate-400" title="Hiển thị mật khẩu"><svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button>
+                 <button onclick="copyToClipboard('${data.token}', this)" class="p-2 hover:bg-slate-700 text-slate-400 border-l border-slate-700" title="Copy Mật khẩu"><svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg></button>
+               </div></div>
+               
+               <div id="pub-link-container-${data.id}">
+                    <div class="text-xs text-amber-400 mt-2 bg-amber-900/20 p-2 rounded flex gap-2 items-center">
+                      <svg class="animate-spin h-4 w-4 text-amber-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                      <span>Cloudflare Tunnel đang khởi động, public link chưa sẵn sàng. Đang chờ...</span>
+                    </div>
+               </div>
+
+               <div><span class="text-slate-400 block text-xs mb-1">Link mạng LAN Nội bộ:</span>
+               <div class="flex w-full bg-slate-900 border border-slate-700 rounded overflow-hidden">
+                 <input type="text" readonly value="${localLink}" class="w-full bg-transparent p-2 text-sm text-slate-300 outline-none"/>
+                 <button onclick="copyToClipboard('${localLink}', this)" class="p-2 hover:bg-slate-700 text-slate-400" title="Copy URL"><svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg></button>
+               </div></div>
+             </div>
+          `;
+
+          showConfirm(`🔗 Đã tạo liên kết chia sẻ`, modalHtml, () => {}, "Đóng", "bg-slate-700 hover:bg-slate-600", true);
+          
+          // Polling for public url
+          let pollInterval = setInterval(async () => {
+              try {
+                  let pubRes = await fetch("/api/share/public_url");
+                  let pubData = await pubRes.json();
+                  if (pubData.url) {
+                      clearInterval(pollInterval);
+                      let pubLink = `${pubData.url}/s/${data.id}`;
+                      let container = document.getElementById(`pub-link-container-${data.id}`);
+                      if (container) {
+                          container.innerHTML = `
+                            <div><span class="text-slate-400 block text-xs mb-1">Link mạng Internet (Public):</span>
+                            <div class="flex w-full bg-slate-900 border border-slate-700 rounded overflow-hidden">
+                              <input type="text" readonly value="${pubLink}" class="w-full bg-transparent p-2 text-sm text-emerald-400 outline-none font-medium"/>
+                              <button onclick="copyToClipboard('${pubLink}', this)" class="p-2 hover:bg-slate-700 text-slate-400" title="Copy URL"><svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg></button>
+                            </div></div>
+                          `;
+                      }
+                  }
+              } catch(e) {}
+          }, 1000);
+      }, "Tạo Link", "bg-indigo-600 hover:bg-indigo-500", true);
+    }
+
+
+    // ==========================================
     // FILE DELETION
     // ==========================================
+    function confirmDeleteFolder(rawPrefix) {
+      const prefix = decodeURIComponent(rawPrefix);
+      showConfirm(
+        `Xóa thư mục '${prefix}'?`,
+        'Tất cả các tập tin trong thư mục này sẽ bị xóa khỏi Vault.',
+        async () => {
+          try {
+            await fetch('/api/file/delete_prefix', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name: prefix.endsWith('/') ? prefix : prefix + '/' })
+            });
+            fetchFiles();
+          } catch (err) {
+            console.error(err);
+          }
+        }
+      );
+    }
+
     function confirmDeleteFile(rawName) {
       const name = decodeURIComponent(rawName);
       showConfirm(
@@ -3755,6 +3911,22 @@
     });
     setInterval(fetchMountStatus, 4000);
     setInterval(fetchWatcherStatus, 4000);
+    setInterval(pollUiActions, 1000);
+
+    async function pollUiActions() {
+      try {
+        const res = await fetch('/api/ui/actions');
+        if (!res.ok) return;
+        const actions = await res.json();
+        for (const action of actions) {
+          // action is something like "?action=store&target=C%3A%5C..."
+          // We can just redirect the window to process the action
+          window.location.search = action;
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
   </script>
 </body>
 </html>

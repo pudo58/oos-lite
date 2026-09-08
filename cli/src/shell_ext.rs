@@ -40,10 +40,10 @@ pub mod windows {
         std::env::current_exe()
             .ok()
             .and_then(|p| {
-                let cli = p.parent()?.join("oos-lite.exe");
+                let cli = p.parent()?.join("oos-lite-gui.exe");
                 Some(cli.to_string_lossy().into_owned())
             })
-            .unwrap_or_else(|| "oos-lite.exe".to_owned())
+            .unwrap_or_else(|| "oos-lite-gui.exe".to_owned())
     }
 
     pub fn icon_path() -> String {
@@ -311,13 +311,20 @@ pub mod windows {
 
     /// Open OOS-Lite window (Edge/Chrome app mode or default system browser).
     fn open_gui_window(query: &str) {
-        ensure_gui_running();
-        let url = if query.is_empty() {
-            "http://127.0.0.1:3000".to_string()
-        } else {
-            format!("http://127.0.0.1:3000/{}", query)
-        };
-        crate::ui::open_desktop_window(&url);
+        let is_running = gui_is_running();
+        if !is_running {
+            ensure_gui_running();
+        }
+
+        if !query.is_empty() {
+            let _ = ureq::post("http://127.0.0.1:3000/api/ui/action")
+                .send(query);
+        }
+
+        // Only open the window if it was not already running, OR if we are just launching the dashboard
+        if !is_running || query.is_empty() {
+            crate::ui::open_desktop_window("http://127.0.0.1:3000");
+        }
     }
 
     /// Handle `context-menu store-file <path>` — prompts or stores file in vault.

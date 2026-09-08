@@ -23,6 +23,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 url = "2.5"
 ctrlc = "3.4"
+ureq = "3.4.1"
+rand = "0.10.2"
 
 [target.'cfg(unix)'.dependencies]
 fuser = "0.14"

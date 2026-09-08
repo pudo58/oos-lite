@@ -951,6 +951,27 @@ impl StorageEngine {
         }
     }
 
+    pub fn delete_prefix(&self, prefix: &str) -> Result<usize> {
+        let _op_guard = self.op_lock.write().map_err(|e| {
+            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
+        })?;
+
+        let all_files = self.metadata_store.list_named_objects()?;
+        let mut count = 0;
+        for (name, _, _) in all_files {
+            if name.starts_with(prefix) {
+                if self.metadata_store.delete_named_object(&name)?.is_some() {
+                    count += 1;
+                }
+            }
+        }
+        if count > 0 {
+            self.metadata_store.flush()?;
+        }
+        info!(prefix = %prefix, count = count, "Successfully unlinked files by prefix");
+        Ok(count)
+    }
+
     /// Unbinds a file name from active tracking without deleting its ObjectRecord and history.
     pub fn unbind_file(&self, name: &str) -> Result<bool> {
         let _op_guard = self.op_lock.write().map_err(|e| {
