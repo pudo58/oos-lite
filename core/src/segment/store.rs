@@ -4,15 +4,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
-use crate::chunk::ChunkId;
-use crate::crypto::VaultKey;
-use crate::error::{OosLiteError, Result};
-use super::format::{
-    ChunkLocation, RecordHeader, SegmentHeader, SEGMENT_HEADER_SIZE,
-};
+use super::format::{ChunkLocation, RecordHeader, SegmentHeader, SEGMENT_HEADER_SIZE};
 use super::index::SegmentIndex;
 use super::reader::SegmentReader;
 use super::writer::{segment_file_name, SegmentWriter};
+use crate::chunk::ChunkId;
+use crate::crypto::VaultKey;
+use crate::error::{OosLiteError, Result};
 
 pub struct SegmentStore {
     pub segments_dir: PathBuf,
@@ -31,10 +29,7 @@ impl SegmentStore {
         Self::with_max_segment_size_and_vault(dir, 0, vault_key)
     }
 
-    pub fn with_max_segment_size<P: AsRef<Path>>(
-        dir: P,
-        max_segment_size: u64,
-    ) -> Result<Self> {
+    pub fn with_max_segment_size<P: AsRef<Path>>(dir: P, max_segment_size: u64) -> Result<Self> {
         Self::with_max_segment_size_and_vault(dir, max_segment_size, None)
     }
 
@@ -47,10 +42,7 @@ impl SegmentStore {
         fs::create_dir_all(&segments_dir)?;
 
         let index = Arc::new(SegmentIndex::new());
-        let (latest_segment_id, resume_offset) = Self::recover_and_index(
-            &segments_dir,
-            &index,
-        )?;
+        let (latest_segment_id, resume_offset) = Self::recover_and_index(&segments_dir, &index)?;
 
         let writer = SegmentWriter::open(
             &segments_dir,
@@ -72,10 +64,7 @@ impl SegmentStore {
 
     /// Scans all segment files in sequential order, validates records,
     /// populates the index, and repairs any partial/corrupted record at EOF caused by crash/kill.
-    fn recover_and_index(
-        segments_dir: &Path,
-        index: &SegmentIndex,
-    ) -> Result<(u64, u64)> {
+    fn recover_and_index(segments_dir: &Path, index: &SegmentIndex) -> Result<(u64, u64)> {
         // Cleanup leftover staging or restore from .old in case of crash during compaction
         let marker_path = segments_dir.join(".compact_done");
         let compact_done = fs::read(&marker_path)
@@ -83,7 +72,6 @@ impl SegmentStore {
             .unwrap_or(false);
 
         let mut old_seg_files = Vec::new();
-        let mut new_seg_files = Vec::new();
 
         if let Ok(entries) = fs::read_dir(segments_dir) {
             for entry in entries.flatten() {
@@ -92,8 +80,6 @@ impl SegmentStore {
                 let name_str = name.to_string_lossy();
                 if name_str.starts_with(".compact_tmp_") {
                     let _ = fs::remove_dir_all(&path);
-                } else if name_str.starts_with("segment_") && name_str.ends_with(".seg") {
-                    new_seg_files.push(path);
                 } else if name_str.starts_with("segment_") && name_str.ends_with(".seg.old") {
                     old_seg_files.push(path);
                 }
@@ -109,15 +95,16 @@ impl SegmentStore {
                 let _ = fs::remove_file(&marker_path);
             } else {
                 // Compaction crashed MID-SWAP! Rollback!
-                // 1. Delete any partially swapped .seg files
-                for seg_path in new_seg_files {
-                    let _ = fs::remove_file(seg_path);
-                }
-                // 2. Restore all .seg.old files back to .seg
+                // Restore only segment IDs that have a backup. Other .seg files may
+                // be original files that compaction had not renamed before crashing.
                 for old_path in old_seg_files {
                     let path_str = old_path.to_string_lossy();
                     let new_path_str = &path_str[..path_str.len() - 4]; // strip ".old"
-                    let _ = fs::rename(&old_path, new_path_str);
+                    let active_path = Path::new(new_path_str);
+                    if active_path.exists() {
+                        fs::remove_file(active_path)?;
+                    }
+                    fs::rename(&old_path, new_path_str)?;
                 }
                 let _ = fs::remove_file(&marker_path);
             }
@@ -214,7 +201,6 @@ impl SegmentStore {
                             },
                         );
 
-
                         current_offset += record_len;
                     }
                     Ok(None) => {
@@ -261,9 +247,10 @@ impl SegmentStore {
             return Ok((chunk_id, false));
         }
 
-        let mut writer = self.writer.lock().map_err(|e| {
-            OosLiteError::Internal(format!("SegmentWriter mutex poisoned: {e}"))
-        })?;
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|e| OosLiteError::Internal(format!("SegmentWriter mutex poisoned: {e}")))?;
         // Double check after lock
         if self.index.contains(&chunk_id) {
             return Ok((chunk_id, false));
@@ -283,9 +270,10 @@ impl SegmentStore {
     }
 
     pub fn sync(&self) -> Result<()> {
-        let mut writer = self.writer.lock().map_err(|e| {
-            OosLiteError::Internal(format!("SegmentWriter mutex poisoned: {e}"))
-        })?;
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|e| OosLiteError::Internal(format!("SegmentWriter mutex poisoned: {e}")))?;
         writer.sync()
     }
 
@@ -305,15 +293,21 @@ impl SegmentStore {
         self.reader.clear_cache();
     }
 
-
-    pub fn reclaim_unreachable_chunks(&self, reachable: &std::collections::HashSet<ChunkId>) -> usize {
+    pub fn reclaim_unreachable_chunks(
+        &self,
+        reachable: &std::collections::HashSet<ChunkId>,
+    ) -> usize {
         self.index.retain(|id, _loc| reachable.contains(id))
     }
 
-    pub fn compact_and_reclaim(&self, reachable: &std::collections::HashSet<ChunkId>) -> Result<usize> {
-        let mut writer_guard = self.writer.lock().map_err(|e| {
-            OosLiteError::Internal(format!("SegmentWriter mutex poisoned: {e}"))
-        })?;
+    pub fn compact_and_reclaim(
+        &self,
+        reachable: &std::collections::HashSet<ChunkId>,
+    ) -> Result<usize> {
+        let mut writer_guard = self
+            .writer
+            .lock()
+            .map_err(|e| OosLiteError::Internal(format!("SegmentWriter mutex poisoned: {e}")))?;
         writer_guard.sync()?;
 
         let total_before = self.index.len();
@@ -348,7 +342,8 @@ impl SegmentStore {
         fs::create_dir_all(&tmp_compact_dir)?;
 
         let new_index = SegmentIndex::new();
-        let mut new_writer = SegmentWriter::open(&tmp_compact_dir, 1, 0, max_seg_size, self.vault_key.clone())?;
+        let mut new_writer =
+            SegmentWriter::open(&tmp_compact_dir, 1, 0, max_seg_size, self.vault_key.clone())?;
 
         // 3. Stream retained chunks ONE-BY-ONE (Zero-OOM streaming)
         for (id, loc) in self.index.entries() {
@@ -439,7 +434,13 @@ impl SegmentStore {
 
             // 6. Update in-memory index and re-attach writer
             self.index.replace_with(new_index);
-            *writer_guard = SegmentWriter::open(&self.segments_dir, latest_seg_id, resume_offset, max_seg_size, self.vault_key.clone())?;
+            *writer_guard = SegmentWriter::open(
+                &self.segments_dir,
+                latest_seg_id,
+                resume_offset,
+                max_seg_size,
+                self.vault_key.clone(),
+            )?;
         } else {
             let _ = fs::remove_dir_all(&tmp_compact_dir);
 
@@ -458,7 +459,13 @@ impl SegmentStore {
 
             // 6. When zero chunks are kept, re-initialize fresh segment_00000001.seg with resume_offset 0
             self.index.replace_with(new_index);
-            *writer_guard = SegmentWriter::open(&self.segments_dir, 1, 0, max_seg_size, self.vault_key.clone())?;
+            *writer_guard = SegmentWriter::open(
+                &self.segments_dir,
+                1,
+                0,
+                max_seg_size,
+                self.vault_key.clone(),
+            )?;
         }
 
         Ok(dead_count)
@@ -475,7 +482,6 @@ impl SegmentStore {
     pub fn unique_raw_bytes(&self) -> u64 {
         self.index.total_raw_bytes()
     }
-
 
     pub fn segments_dir(&self) -> &Path {
         &self.segments_dir

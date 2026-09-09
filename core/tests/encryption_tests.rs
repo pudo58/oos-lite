@@ -1,7 +1,7 @@
-use std::fs;
-use std::path::Path;
 use oos_lite_core::error::OosLiteError;
 use oos_lite_core::StorageEngine;
+use std::fs;
+use std::path::Path;
 use tempfile::tempdir;
 
 #[test]
@@ -16,7 +16,8 @@ fn test_encrypted_store_put_get_roundtrip() {
         assert!(engine.is_encrypted());
 
         let test_file = dir.path().join("sample.txt");
-        let sample_data = b"Hello, encrypted OOS-Lite world! Testing XChaCha20-Poly1305.".repeat(50);
+        let sample_data =
+            b"Hello, encrypted OOS-Lite world! Testing XChaCha20-Poly1305.".repeat(50);
         fs::write(&test_file, &sample_data).unwrap();
 
         let summary = engine.put_file_named("sample.txt", &test_file).unwrap();
@@ -75,6 +76,63 @@ fn test_encrypted_store_wrong_password_fails() {
 }
 
 #[test]
+fn test_concurrent_encrypted_initialization_keeps_winning_key() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use std::time::Duration;
+
+    let dir = tempdir().unwrap();
+    let store_path = Arc::new(dir.path().join("concurrent-store"));
+    let input_path = Arc::new(dir.path().join("payload.txt"));
+    fs::write(
+        input_path.as_ref(),
+        b"encrypted initialization race payload",
+    )
+    .unwrap();
+    let start = Arc::new(Barrier::new(3));
+
+    let mut handles = Vec::new();
+    for password in ["ConcurrentPasswordAlpha!", "ConcurrentPasswordBeta!"] {
+        let store_path = Arc::clone(&store_path);
+        let input_path = Arc::clone(&input_path);
+        let start = Arc::clone(&start);
+        handles.push(thread::spawn(move || {
+            start.wait();
+            match StorageEngine::open_with_password(store_path.as_ref(), password) {
+                Ok(engine) => {
+                    engine
+                        .put_file_named("payload.txt", input_path.as_ref())
+                        .unwrap();
+                    thread::sleep(Duration::from_millis(200));
+                    Ok(password)
+                }
+                Err(err) => Err(err),
+            }
+        }));
+    }
+
+    start.wait();
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let winner = results
+        .iter()
+        .find_map(|result| result.as_ref().ok().copied())
+        .expect("one initializer must acquire the store lock");
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert!(results
+        .iter()
+        .any(|result| matches!(result, Err(OosLiteError::StoreLocked(_)))));
+
+    let engine = StorageEngine::open_with_password(store_path.as_ref(), winner)
+        .expect("winning password must continue to unlock the store");
+    let restored = dir.path().join("race-restored.txt");
+    engine.get_file("payload.txt", &restored).unwrap();
+    assert_eq!(
+        fs::read(restored).unwrap(),
+        b"encrypted initialization race payload"
+    );
+}
+
+#[test]
 fn test_deduplication_preserved_under_encryption() {
     let dir = tempdir().unwrap();
     let store_path = dir.path().join("store");
@@ -82,7 +140,9 @@ fn test_deduplication_preserved_under_encryption() {
 
     let engine = StorageEngine::open_with_password(&store_path, password).unwrap();
 
-    let content = b"Identical repeated chunk content that must be deduplicated across encrypted objects.".repeat(200);
+    let content =
+        b"Identical repeated chunk content that must be deduplicated across encrypted objects."
+            .repeat(200);
     let file1 = dir.path().join("file1.bin");
     let file2 = dir.path().join("file2.bin");
     fs::write(&file1, &content).unwrap();
@@ -113,7 +173,9 @@ fn test_ciphertext_on_disk_is_never_plaintext() {
     let test_file = dir.path().join("confidential.txt");
     fs::write(&test_file, secret_phrase.as_bytes()).unwrap();
 
-    engine.put_file_named("confidential.txt", &test_file).unwrap();
+    engine
+        .put_file_named("confidential.txt", &test_file)
+        .unwrap();
     drop(engine);
 
     // Search every file in the store directory recursively
@@ -145,7 +207,11 @@ fn test_encrypted_tampered_segment_detected() {
     {
         let engine = StorageEngine::open_with_password(&store_path, password).unwrap();
         let test_file = dir.path().join("important.txt");
-        fs::write(&test_file, b"Integrity check payload for Poly1305 MAC tampering test.").unwrap();
+        fs::write(
+            &test_file,
+            b"Integrity check payload for Poly1305 MAC tampering test.",
+        )
+        .unwrap();
         engine.put_file_named("important.txt", &test_file).unwrap();
     }
 
@@ -180,7 +246,11 @@ fn test_encrypted_gc_and_fsck() {
     let engine = StorageEngine::open_with_password(&store_path, password).unwrap();
 
     let f1 = dir.path().join("f1.txt");
-    fs::write(&f1, b"Temporary chunk data that will be unreferenced after deletion.").unwrap();
+    fs::write(
+        &f1,
+        b"Temporary chunk data that will be unreferenced after deletion.",
+    )
+    .unwrap();
     engine.put_file_named("f1.txt", &f1).unwrap();
 
     let f2 = dir.path().join("f2.txt");
@@ -204,7 +274,10 @@ fn test_encrypted_gc_and_fsck() {
     // Read f2 to verify it is intact
     let out2 = dir.path().join("out2.txt");
     engine.get_file("f2.txt", &out2).unwrap();
-    assert_eq!(fs::read(&out2).unwrap(), b"Persistent chunk data that stays alive across GC.");
+    assert_eq!(
+        fs::read(&out2).unwrap(),
+        b"Persistent chunk data that stays alive across GC."
+    );
 }
 
 #[test]
@@ -217,19 +290,20 @@ fn test_encrypted_wal_crash_recovery() {
     {
         let engine = StorageEngine::open_with_password(&store_path, password).unwrap();
         let f = dir.path().join("crash_test.txt");
-        let content = b"Content to be safely replayed through encrypted WAL after simulated crash.".to_vec();
+        let content =
+            b"Content to be safely replayed through encrypted WAL after simulated crash.".to_vec();
         fs::write(&f, &content).unwrap();
 
         // Write directly to WAL without putting into segments to simulate crash before segment write
         let wal_dir = store_path.join("wal");
-        let mut wal = oos_lite_core::wal::Wal::open_with_vault(
-            &wal_dir,
-            engine.vault_key().cloned(),
-        ).unwrap();
+        let mut wal =
+            oos_lite_core::wal::Wal::open_with_vault(&wal_dir, engine.vault_key().cloned())
+                .unwrap();
 
         let cid = oos_lite_core::chunk::ChunkId::from_data(&content);
         let content_hash = *blake3::hash(&content).as_bytes();
-        let manifest = oos_lite_core::manifest::Manifest::new(vec![cid], content.len() as u64, content_hash);
+        let manifest =
+            oos_lite_core::manifest::Manifest::new(vec![cid], content.len() as u64, content_hash);
         let wal_payload = oos_lite_core::wal::WalPutPayload {
             name: "uncheckpointed.txt".to_string(),
             object_id: oos_lite_core::object::ObjectId::generate(),
@@ -323,7 +397,10 @@ fn test_atomic_vault_key_creation() {
     for entry in fs::read_dir(&store_path).unwrap().flatten() {
         let name = entry.file_name();
         let s = name.to_string_lossy();
-        assert!(!s.starts_with(".vault.key.tmp"), "Temporary vault file remained: {}", s);
+        assert!(
+            !s.starts_with(".vault.key.tmp"),
+            "Temporary vault file remained: {}",
+            s
+        );
     }
 }
-

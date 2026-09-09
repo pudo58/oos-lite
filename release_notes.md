@@ -1,51 +1,61 @@
-## OOS-Lite v0.2.2 - Cloudflare Tunnel Auto-Provisioning, Share UI Overhaul & Windows Shell Fixes
+## OOS-Lite v0.2.3 - Core Durability and Recovery Fixes
 
-### 🚀 Key Improvements & Highlights
+This patch release fixes several storage-engine failure modes and improves large-file ingestion without changing the public API or on-disk formats.
 
-- **Seamless Internet Sharing with Cloudflare Quick Tunnels**:
-  - **Zero-Configuration Auto-Download**: OOS-Lite now automatically provisions and runs `cloudflared` directly into the vault's `.oos-store/bin/` on demand. Users no longer need to manually install or configure any external tunneling tools.
-  - **Hidden Background Daemon**: Spawns `cloudflared` with `CREATE_NO_WINDOW` on Windows, eliminating flashing command-line terminals when generating public links.
-  - **Zombie Process Cleanup**: Proactively terminates orphaned `cloudflared` background instances on startup and share creation to prevent port contention and hanging tunnels.
+### Core fixes
 
-- **Polished File Share Experience**:
-  - **Security & Privacy**: Added password hide/reveal toggle and masked password inputs.
-  - **One-Click Clipboard Actions**: Fast copy buttons for LAN address, Internet Public URL, and Passwords with visual checkmarks and instant toast notifications.
-  - **Real-Time Polling**: Smart auto-polling UI that gracefully waits for Cloudflare's ephemeral URL assignment and displays the ready link without requiring popup reloads.
-  - **Session Guard Warning**: Inlined persistent warnings alerting users to keep OOS-Lite active while sharing files.
+- Fixed GC rollback after a crash during a partial multi-segment swap. Original segments that had not yet been renamed are now preserved.
+- Fixed a race during encrypted-store initialization by acquiring the exclusive store lock before reading or creating `vault.key`.
+- Changed new writes to stream chunks directly into durable segment storage. WAL records now contain metadata and manifests instead of retaining all new file data in memory.
+- Added WAL recovery validation so metadata is never committed when a manifest references a missing durable chunk.
+- Added checked WAL length conversions for names, manifests, chunk counts, chunk sizes, total payload size, and encryption overhead.
+- Fixed watcher reconciliation so same-size content changes are detected with BLAKE3.
+- Standardized the remaining core decryption error message in English.
 
-- **Windows Shell & Context Menu Hardening**:
-  - **Silent Routing**: Shell context menu commands ("Store in Vault", "View History", "Restore", "Snapshot") now route directly through `oos-lite-gui.exe` instead of popping console windows.
-  - **Fixed "Select an app" File Association Glitch**: Corrected installer payload to register GUI targets in HKCU without prompting Windows file-open dialogs.
-  - **Resilient URL Parsing**: Upgraded Cloudflare output scanner to handle ANSI terminal escape sequences and variable output buffering reliably.
+Existing WAL records containing chunk data remain readable. Existing vaults and segment files require no migration.
 
----
+### Windows installation
 
-### 🐧 Linux Quick Start & Installation
+Download `OOS-Lite-Setup-v0.2.3.exe` and run the installer. The portable package `oos-lite-windows-x86_64-v0.2.3.zip` is also available for use without installation.
+
+### Linux installation
+
+OOS-Lite requires FUSE 3 for virtual filesystem mounting.
 
 ```bash
-# 1. Download Linux binary bundle from GitHub Release v0.2.2
-wget https://github.com/pudo58/oos-lite/releases/download/v0.2.2/oos-lite-linux-x86_64-v0.2.2.tar.gz
+# Ubuntu / Debian dependencies
+sudo apt update
+sudo apt install -y libfuse3-3 fuse3
 
-# 2. Extract the archive and set executable permissions
-tar -xzf oos-lite-linux-x86_64-v0.2.2.tar.gz
-chmod +x oos-lite oos-lite-gui
+# Download and extract OOS-Lite
+wget https://github.com/pudo58/oos-lite/releases/download/v0.2.3/oos-lite-linux-x86_64-v0.2.3.tar.gz
+mkdir -p "$HOME/.local/share/oos-lite"
+tar -xzf oos-lite-linux-x86_64-v0.2.3.tar.gz -C "$HOME/.local/share/oos-lite"
 
-# 3. Install runtime dependency (for Ubuntu / Debian)
-sudo apt update && sudo apt install -y libfuse2
+# Install the CLI and GUI launcher for the current user
+mkdir -p "$HOME/.local/bin"
+ln -sf "$HOME/.local/share/oos-lite/oos-lite" "$HOME/.local/bin/oos-lite"
+ln -sf "$HOME/.local/share/oos-lite/oos-lite-gui" "$HOME/.local/bin/oos-lite-gui"
 
-# 4. Check version and view CLI help
-./oos-lite --version
-./oos-lite --help
+# Ensure ~/.local/bin is available in the current shell
+export PATH="$HOME/.local/bin:$PATH"
 
-# 5. Launch embedded Web UI Dashboard & Diff Studio
-./oos-lite ui
+# Verify and initialize a store
+oos-lite --version
+oos-lite --store "$HOME/.oos-store" init
 ```
 
----
+To keep `~/.local/bin` on `PATH`, add the following line to `~/.bashrc` or `~/.zshrc`:
 
-### 📦 Download Assets
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
 
-- **Windows Installer (Recommended)**: `OOS-Lite-Setup-v0.2.2.exe` (Complete setup wizard with desktop shortcut, context menu integration, and uninstaller)
-- **Windows Portable Bundle**: `oos-lite-windows-x86_64-v0.2.2.zip` (Pre-compiled standalone Windows binaries)
-- **Linux Standalone Bundle**: `oos-lite-linux-x86_64-v0.2.2.tar.gz` (Pre-compiled native 64-bit Linux binaries with FUSE support)
-- **Integrity Checksums**: `SHA256SUMS.txt` (SHA-256 verification hash list)
+For an encrypted store, initialize with `oos-lite --store "$HOME/.oos-store" --password init`.
+
+### Release assets
+
+- `OOS-Lite-Setup-v0.2.3.exe` - Windows installer
+- `oos-lite-windows-x86_64-v0.2.3.zip` - Windows portable binaries
+- `oos-lite-linux-x86_64-v0.2.3.tar.gz` - Linux x86_64 binaries
+- `SHA256SUMS.txt` - SHA-256 checksums for all packages

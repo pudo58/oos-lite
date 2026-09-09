@@ -2,7 +2,7 @@
 ; Developer / Publisher: pudo58
 
 #define MyAppName "OOS-Lite"
-#define MyAppVersion "0.2.2"
+#define MyAppVersion "0.2.3"
 #define MyAppPublisher "pudo58"
 #define MyAppURL "https://github.com/pudo58/oos-lite"
 #define MyAppExeName "oos-lite.exe"
@@ -22,17 +22,17 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 LicenseFile=..\LICENSE-MIT
 OutputDir=..\dist
-OutputBaseFilename=OOS-Lite-Setup-v0.2.2
+OutputBaseFilename=OOS-Lite-Setup-v0.2.3
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
 SetupIconFile=app.ico
-VersionInfoVersion=0.2.2.0
+VersionInfoVersion=0.2.3.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription=OOS-Lite Setup - Content-Addressed File Storage & Vault Drive
 VersionInfoCopyright=Copyright (C) 2026 {#MyAppPublisher}
 VersionInfoProductName={#MyAppName}
-VersionInfoProductVersion=0.2.2.0
+VersionInfoProductVersion=0.2.3.0
 ChangesEnvironment=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog

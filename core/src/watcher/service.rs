@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, RwLock};
@@ -10,6 +11,7 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 use tracing::{error, info, warn};
 use walkdir::WalkDir;
 
+use crate::engine::open_safe_read;
 use crate::error::{OosLiteError, Result};
 use crate::watcher::config::WatcherConfig;
 use crate::watcher::ignore::IgnoreRules;
@@ -52,6 +54,20 @@ pub struct WatcherService {
 }
 
 impl WatcherService {
+    fn hash_file(path: &Path) -> std::io::Result<[u8; 32]> {
+        let mut file = open_safe_read(path)?;
+        let mut hasher = blake3::Hasher::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok(*hasher.finalize().as_bytes())
+    }
+
     pub fn new(engine: Arc<StorageEngine>, config: WatcherConfig) -> Self {
         let ignore_rules = Arc::new(RwLock::new(IgnoreRules::load(&config.watch_dir)));
         Self {
@@ -85,8 +101,9 @@ impl WatcherService {
 
         // 2. Setup notify channel & watcher
         let (tx, rx) = mpsc::channel();
-        let mut watcher = RecommendedWatcher::new(tx, Config::default())
-            .map_err(|e| OosLiteError::Internal(format!("Failed to initialize notify watcher: {e}")))?;
+        let mut watcher = RecommendedWatcher::new(tx, Config::default()).map_err(|e| {
+            OosLiteError::Internal(format!("Failed to initialize notify watcher: {e}"))
+        })?;
 
         watcher
             .watch(&self.config.watch_dir, RecursiveMode::Recursive)
@@ -170,7 +187,9 @@ impl WatcherService {
                     thread::sleep(Duration::from_millis(50));
                 }
             })
-            .map_err(|e| OosLiteError::Internal(format!("Failed to spawn watcher worker thread: {e}")))?;
+            .map_err(|e| {
+                OosLiteError::Internal(format!("Failed to spawn watcher worker thread: {e}"))
+            })?;
 
         Ok(WatcherHandle {
             running,
@@ -191,7 +210,13 @@ impl WatcherService {
         match event.kind {
             EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
                 if event.paths.len() == 2 {
-                    Self::queue_rename(event.paths[0].clone(), event.paths[1].clone(), watch_dir, &rules, pending);
+                    Self::queue_rename(
+                        event.paths[0].clone(),
+                        event.paths[1].clone(),
+                        watch_dir,
+                        &rules,
+                        pending,
+                    );
                     return;
                 }
             }
@@ -258,10 +283,7 @@ impl WatcherService {
             lock.remove(&from);
             lock.insert(
                 to.clone(),
-                (
-                    Instant::now(),
-                    PendingAction::Rename { from, to },
-                ),
+                (Instant::now(), PendingAction::Rename { from, to }),
             );
         }
     }
@@ -325,7 +347,9 @@ impl WatcherService {
                                 // Still inside cooldown window; defer action
                                 drop(sync_lock);
                                 let mut p_lock = pending.lock().unwrap();
-                                p_lock.entry(path).or_insert((Instant::now(), PendingAction::CreateOrModify));
+                                p_lock
+                                    .entry(path)
+                                    .or_insert((Instant::now(), PendingAction::CreateOrModify));
                                 continue;
                             }
                         }
@@ -352,7 +376,8 @@ impl WatcherService {
                                     "File locked by editor (SharingViolation); deferring retry..."
                                 );
                                 let mut p_lock = pending.lock().unwrap();
-                                p_lock.insert(path, (Instant::now(), PendingAction::CreateOrModify));
+                                p_lock
+                                    .insert(path, (Instant::now(), PendingAction::CreateOrModify));
                             } else {
                                 error!(name = %logical_name, error = %err, "Auto-Vault ingest error");
                             }
@@ -374,7 +399,9 @@ impl WatcherService {
                                 sync_lock.remove(&logical_name);
                             }
                         }
-                        Err(e) => error!(name = %logical_name, error = %e, "Failed to unbind file mapping"),
+                        Err(e) => {
+                            error!(name = %logical_name, error = %e, "Failed to unbind file mapping")
+                        }
                     }
                 }
                 PendingAction::Rename { from, to } => {
@@ -403,7 +430,9 @@ impl WatcherService {
                                     let _ = engine.put_file_named(&t_name, &to);
                                 }
                             }
-                            Err(e) => error!(from = %f_name, to = %t_name, error = %e, "Failed to rename file"),
+                            Err(e) => {
+                                error!(from = %f_name, to = %t_name, error = %e, "Failed to rename file")
+                            }
                         }
                     }
                 }
@@ -471,6 +500,9 @@ impl WatcherService {
                             Ok(Some(manifest)) => {
                                 let meta_len = entry.metadata().map(|m| m.len()).unwrap_or(0);
                                 meta_len != manifest.total_size
+                                    || Self::hash_file(p)
+                                        .map(|hash| hash != manifest.content_hash)
+                                        .unwrap_or(true)
                             }
                             _ => true,
                         }

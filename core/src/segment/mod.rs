@@ -62,8 +62,8 @@ mod tests {
     fn test_segment_rotation() {
         let dir = tempdir().expect("tempdir failed");
         // Use a tiny max_segment_size (150 bytes) to force rotation
-        let store = SegmentStore::with_max_segment_size(dir.path(), 150)
-            .expect("store init failed");
+        let store =
+            SegmentStore::with_max_segment_size(dir.path(), 150).expect("store init failed");
 
         let data1 = vec![b'A'; 60];
         let data2 = vec![b'B'; 60];
@@ -88,7 +88,11 @@ mod tests {
                 seg_files += 1;
             }
         }
-        assert!(seg_files > 1, "Expected at least 2 segment files after rotation, found {}", seg_files);
+        assert!(
+            seg_files > 1,
+            "Expected at least 2 segment files after rotation, found {}",
+            seg_files
+        );
     }
 
     #[test]
@@ -117,7 +121,8 @@ mod tests {
                 .open(&seg_path)
                 .expect("open segment failed");
             // Write corrupted partial bytes (incomplete header)
-            file.write_all(b"OOSR_PARTIAL_CORRUPTED_BYTES_HERE_1234").expect("write garbage failed");
+            file.write_all(b"OOSR_PARTIAL_CORRUPTED_BYTES_HERE_1234")
+                .expect("write garbage failed");
             file.sync_all().expect("sync garbage failed");
         }
 
@@ -128,16 +133,56 @@ mod tests {
             // All previously committed chunks must be 100% intact
             for (id, original_data) in &valid_ids {
                 assert!(store.has_chunk(id));
-                let read_data = store.get_chunk(id).expect("read chunk failed after recovery");
+                let read_data = store
+                    .get_chunk(id)
+                    .expect("read chunk failed after recovery");
                 assert_eq!(&read_data, original_data);
             }
 
             // Verify store can continue writing new chunks normally after recovery
             let new_data = b"New chunk written after clean recovery";
-            let (new_id, is_new) = store.put_chunk(new_data).expect("put after recovery failed");
+            let (new_id, is_new) = store
+                .put_chunk(new_data)
+                .expect("put after recovery failed");
             assert!(is_new);
             assert_eq!(store.get_chunk(&new_id).unwrap(), new_data);
         }
+    }
+
+    #[test]
+    fn test_compaction_rollback_preserves_segments_not_yet_renamed() {
+        let dir = tempdir().expect("tempdir failed");
+        let data1: Vec<u8> = (0..96).map(|i| (i * 37) as u8).collect();
+        let data2: Vec<u8> = (0..96).map(|i| (i * 73 + 11) as u8).collect();
+
+        let (id1, id2) = {
+            let store =
+                SegmentStore::with_max_segment_size(dir.path(), 220).expect("store init failed");
+            let (id1, _) = store.put_chunk(&data1).unwrap();
+            let (id2, _) = store.put_chunk(&data2).unwrap();
+            store.sync().unwrap();
+            assert_ne!(
+                store.get_location(&id1).unwrap().segment_id,
+                store.get_location(&id2).unwrap().segment_id
+            );
+            (id1, id2)
+        };
+
+        let first = dir.path().join("segment_00000001.seg");
+        let first_old = dir.path().join("segment_00000001.seg.old");
+        let second = dir.path().join("segment_00000002.seg");
+        std::fs::rename(&first, &first_old).unwrap();
+        assert!(
+            second.exists(),
+            "second original segment must remain active"
+        );
+
+        let recovered = SegmentStore::with_max_segment_size(dir.path(), 220)
+            .expect("partial compaction rollback failed");
+        assert_eq!(recovered.get_chunk(&id1).unwrap(), data1);
+        assert_eq!(recovered.get_chunk(&id2).unwrap(), data2);
+        assert!(first.exists());
+        assert!(second.exists());
     }
 
     #[test]
@@ -164,7 +209,8 @@ mod tests {
         assert!(
             location.payload_len < (location.raw_len / 5),
             "Expected payload_len ({} bytes) to be < 20% of raw_len ({} bytes)",
-            location.payload_len, location.raw_len
+            location.payload_len,
+            location.raw_len
         );
 
         // Verify decompression extracts byte-for-byte identical content
@@ -207,7 +253,9 @@ mod tests {
         let dir = tempdir().expect("tempdir failed");
         let store = SegmentStore::new(dir.path()).expect("store init failed");
 
-        let raw_data = b"Predictable text for testing bit-rot CRC32C detection before decompression".repeat(20);
+        let raw_data =
+            b"Predictable text for testing bit-rot CRC32C detection before decompression"
+                .repeat(20);
         let (id, _) = store.put_chunk(&raw_data).expect("put chunk failed");
         store.sync().expect("sync failed");
 
@@ -215,18 +263,23 @@ mod tests {
 
         // Flip a byte in the physical stored payload on disk
         let seg_path = dir.path().join("segment_00000001.seg");
-        let mut file = OpenOptions::new().read(true).write(true).open(&seg_path).expect("open failed");
-        file.seek(SeekFrom::Start(location.payload_offset)).expect("seek failed");
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&seg_path)
+            .expect("open failed");
+        file.seek(SeekFrom::Start(location.payload_offset))
+            .expect("seek failed");
         let mut byte = [0u8; 1];
         std::io::Read::read_exact(&mut file, &mut byte).expect("read byte failed");
         byte[0] ^= 0xFF; // flip bits
-        file.seek(SeekFrom::Start(location.payload_offset)).expect("seek failed");
+        file.seek(SeekFrom::Start(location.payload_offset))
+            .expect("seek failed");
         file.write_all(&byte).expect("write corrupted byte failed");
         file.sync_all().expect("sync failed");
 
         // Clear reader cache so it re-reads from disk
         store.clear_cache();
-
 
         // Reading the chunk must fail at the CRC32C physical verification step
         let result = store.get_chunk(&id);
@@ -237,4 +290,3 @@ mod tests {
         }
     }
 }
-

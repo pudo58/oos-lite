@@ -222,7 +222,7 @@ impl VaultKey {
             .decrypt(XNonce::from_slice(nonce), payload)
             .map_err(|_| {
                 OosLiteError::DecryptionFailed(
-                    "Xác thực Poly1305 thất bại (dữ liệu chunk bị giả mạo hoặc sai khóa giải mã)"
+                    "Poly1305 authentication failed (chunk data was tampered with or the decryption key is incorrect)"
                         .to_string(),
                 )
             })

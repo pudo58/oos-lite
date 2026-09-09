@@ -85,4 +85,3 @@ impl SegmentIndex {
         map.values().map(|loc| loc.raw_len as u64).sum()
     }
 }
-

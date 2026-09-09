@@ -40,8 +40,21 @@ fn test_watcher_debounce_and_auto_put() {
 
     // 3. Wait until cooldown expires, then modify again
     thread::sleep(Duration::from_millis(900));
-    fs::write(&file_path, b"Line 1\nLine 2\nLine 3 final\nLine 4 new version\n").unwrap();
-    thread::sleep(Duration::from_millis(700));
+    fs::write(
+        &file_path,
+        b"Line 1\nLine 2\nLine 3 final\nLine 4 new version\n",
+    )
+    .unwrap();
+    for _ in 0..30 {
+        if engine
+            .get_versions("notes.txt")
+            .map(|versions| versions.len() >= 2)
+            .unwrap_or(false)
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 
     // Verify engine now has version 2
     let versions2 = engine.get_versions("notes.txt").unwrap();
@@ -75,7 +88,11 @@ fn test_watcher_ignore_rules_and_oosignore() {
     fs::write(watch_dir.path().join("cache.secret_cache"), b"cache").unwrap();
 
     // Valid file
-    fs::write(watch_dir.path().join("valid_document.pdf"), b"real work content").unwrap();
+    fs::write(
+        watch_dir.path().join("valid_document.pdf"),
+        b"real work content",
+    )
+    .unwrap();
 
     let engine = Arc::new(StorageEngine::open(store_dir.path()).unwrap());
     let config = WatcherConfig::new(watch_dir.path());
@@ -123,13 +140,26 @@ fn test_watcher_rename_preserves_version_history() {
     // Now rename draft_report.docx -> final_report.docx
     let new_file = watch_dir.path().join("final_report.docx");
     fs::rename(&old_file, &new_file).unwrap();
-    thread::sleep(Duration::from_millis(600));
+    for _ in 0..30 {
+        if engine
+            .get_versions("final_report.docx")
+            .map(|versions| versions.len() >= 2)
+            .unwrap_or(false)
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 
     // Under the new name final_report.docx, both version 1 and 2 must be preserved!
     let v_new = engine.get_versions("final_report.docx");
     assert!(v_new.is_ok(), "Expected final_report.docx to exist");
     let versions = v_new.unwrap();
-    assert_eq!(versions.len(), 2, "Must preserve previous 2 versions under new name!");
+    assert_eq!(
+        versions.len(),
+        2,
+        "Must preserve previous 2 versions under new name!"
+    );
 
     // And old name must no longer be directly bound
     assert!(engine.get_versions("draft_report.docx").is_err());
@@ -159,6 +189,28 @@ fn test_reconciliation_scanner_cold_start() {
 }
 
 #[test]
+fn test_reconciliation_detects_same_size_content_change() {
+    let watch_dir = tempdir().unwrap();
+    let store_dir = tempdir().unwrap();
+    let file_path = watch_dir.path().join("same-size.txt");
+    fs::write(&file_path, b"AAAA").unwrap();
+
+    let engine = Arc::new(StorageEngine::open(store_dir.path()).unwrap());
+    let config = WatcherConfig::new(watch_dir.path());
+    let service = WatcherService::new(Arc::clone(&engine), config);
+    service.reconciliation_scan().unwrap();
+
+    fs::write(&file_path, b"BBBB").unwrap();
+    service.reconciliation_scan().unwrap();
+
+    let versions = engine.get_versions("same-size.txt").unwrap();
+    assert_eq!(versions.len(), 2);
+    let restored = store_dir.path().join("same-size-restored.txt");
+    engine.get_file("same-size.txt", &restored).unwrap();
+    assert_eq!(fs::read(restored).unwrap(), b"BBBB");
+}
+
+#[test]
 fn test_prune_file_versions_and_gc() {
     let store_dir = tempdir().unwrap();
     let engine = StorageEngine::open(store_dir.path()).unwrap();
@@ -167,7 +219,11 @@ fn test_prune_file_versions_and_gc() {
 
     // Put 6 different versions
     for i in 1..=6 {
-        fs::write(&tmp, format!("Version {} distinct chunk payload content", i)).unwrap();
+        fs::write(
+            &tmp,
+            format!("Version {} distinct chunk payload content", i),
+        )
+        .unwrap();
         engine.put_file_named("sample.txt", &tmp).unwrap();
     }
 

@@ -3,114 +3,93 @@ name: Release / Build Assets
 on:
   push:
     tags:
-      - 'v*'
-  workflow_dispatch:
-    inputs:
-      tag_name:
-        description: 'Tag name for release (e.g. v0.1.0)'
-        required: false
-        default: 'v0.1.0'
+      - "v*"
 
 permissions:
   contents: write
 
 jobs:
-  build-and-release:
-    name: Build Windows Release & Publish Assets
+  build-windows:
+    name: Build Windows assets
     runs-on: windows-latest
-
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Rust Stable Toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress
 
-      - name: Install Inno Setup via Chocolatey
-        run: |
-          choco install innosetup --no-progress
+      - name: Build optimized binaries
+        run: cargo build --release -p oos-lite --bins
 
-      - name: Build Optimized Release Binaries
-        run: |
-          cargo build --release -p oos-lite --bins
-
-      - name: Create Standalone Binary ZIP Archive
+      - name: Package portable bundle and installer
         shell: pwsh
         run: |
-          Compress-Archive -Path target\release\oos-lite.exe, target\release\oos-lite-gui.exe, uninstall.bat, README.md, LICENSE-MIT -DestinationPath oos-lite-windows-x86_64.zip -Force
-
-      - name: Compile Windows Installer with Inno Setup
-        shell: pwsh
-        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive `
+            -Path target\release\oos-lite.exe,target\release\oos-lite-gui.exe,uninstall.bat,README.md,LICENSE-MIT,LICENSE-APACHE `
+            -DestinationPath dist\oos-lite-windows-x86_64-v0.2.3.zip `
+            -Force
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\oos-lite.iss
 
-      - name: Generate SHA-256 Checksums
-        shell: pwsh
-        run: |
-          $setupExe = (Get-Item dist\OOS-Lite-Setup-*.exe | Select-Object -First 1).FullName
-          $hashes = Get-FileHash -Algorithm SHA256 $setupExe, oos-lite-windows-x86_64.zip
-          $hashes | ForEach-Object { "$($_.Hash)  $($_.Path | Split-Path -Leaf)" } | Out-File -Encoding utf8 SHA256SUMS.txt
-          Get-Content SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-assets
+          path: |
+            dist/OOS-Lite-Setup-v0.2.3.exe
+            dist/oos-lite-windows-x86_64-v0.2.3.zip
 
-      - name: Determine Release Tag
-        id: get_tag
-        shell: pwsh
-        run: |
-          if ("${{ github.ref_type }}" -eq "tag") {
-            $tag = "${{ github.ref_name }}"
-          } elseif ("${{ inputs.tag_name }}" -ne "") {
-            $tag = "${{ inputs.tag_name }}"
-          } else {
-            $tag = "v0.2.0"
-          }
-          echo "tag=$tag" >> $env:GITHUB_OUTPUT
+  build-linux:
+    name: Build Linux asset
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Create GitHub Release & Upload Assets
+      - name: Install FUSE dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse3-dev pkg-config
+
+      - name: Build optimized binaries
+        run: cargo build --release -p oos-lite --bins
+
+      - name: Package Linux bundle
+        run: |
+          mkdir -p dist/package
+          cp target/release/oos-lite target/release/oos-lite-gui README.md LICENSE-MIT LICENSE-APACHE dist/package/
+          tar -czf dist/oos-lite-linux-x86_64-v0.2.3.tar.gz -C dist/package .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-assets
+          path: dist/oos-lite-linux-x86_64-v0.2.3.tar.gz
+
+  publish:
+    name: Publish GitHub release
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        run: |
+          cd dist
+          sha256sum OOS-Lite-Setup-v0.2.3.exe oos-lite-windows-x86_64-v0.2.3.zip oos-lite-linux-x86_64-v0.2.3.tar.gz > SHA256SUMS.txt
+
+      - name: Publish release and assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.get_tag.outputs.tag }}
-          name: "OOS-Lite ${{ steps.get_tag.outputs.tag }} - Version Diff Studio, In-Place Rollback & Native Desktop Experience"
-          body: |
-            ## OOS-Lite ${{ steps.get_tag.outputs.tag }} - Version Diff Studio, In-Place Rollback & Native Desktop Experience
-
-            ### 🚀 Key Features & Highlights:
-            - **Version Inspector & Diff Studio**:
-              - Real-time line-by-line diff comparison powered by an optimized Myers diff algorithm with prefix/suffix trimming.
-              - Visual color-coded diff table with dual line numbering (`[-] Red` for Current Version lines, `[+] Green` for Selected Historical Version lines).
-              - Stat badges tracking additions and deletions (`+X / -Y line differences`).
-              - Flexible 3-way mode switcher: `🔀 Line Diff`, `📄 Selected Version Content` (with line numbering and 1-click clipboard copy), and `📋 Current Version Content`.
-              - Visual side-by-side comparison for image files (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.svg`).
-              - File size and BLAKE3 hash delta inspection for non-text binary formats.
-
-            - **One-Click In-Place Rollback**:
-              - Direct in-place file restoration on disk without requiring manual file download and replacement.
-              - Non-destructive, auditable vault commits: rolling back creates a new forward version pointing to the target manifest, preserving full version history and audit trails.
-              - Instant rollback action buttons available directly inside both the version history table and the Inspector header.
-
-            - **Native Desktop Application Window**:
-              - Upgraded GUI launcher to run in standalone Chromium Application Mode (`--app`), eliminating browser address bars, navigation controls, bookmarks, and tabs.
-              - True native desktop window experience with dedicated title bar, custom app icon, standard Windows window controls (minimize, maximize, snap layout, close), and default 1200x820 sizing.
-              - Supported across Microsoft Edge (pre-installed on Windows 10/11), Google Chrome, and Brave.
-
-            - **Complete Multi-Tier Uninstallation System**:
-              - Automated process killer: cleanly terminates `oos-lite.exe` and `oos-lite-gui.exe`.
-              - Network port scavenger: frees TCP ports `3000` (Web Dashboard) and `8080` (WebDAV drive).
-              - Virtual drive unmapper: safely disconnects drive `Z:\` (`net use Z: /delete /y`).
-              - Clean Registry removal: unregisters all Windows Explorer context menu keys.
-              - Standalone single-click script (`uninstall.bat`) and integrated CLI commands (`oos-lite stop`, `oos-lite uninstall`).
-
-            - **Full Explorer Context Menu Integration**:
-              - Right-click integration for files and directories (Store in Vault, View Version History, Snapshot Folder, Auto-Vault Sync).
-              - Seamless handover from Windows Explorer right-click directly into the Desktop App and Version Diff Studio.
-
-            ### 📦 Download Assets:
-            - **Installer (.exe)**: `OOS-Lite-Setup-v0.2.0.exe` (Recommended Windows Installer with uninstaller & desktop shortcuts)
-            - **Portable CLI/GUI (.zip)**: `oos-lite-windows-x86_64.zip` (Standalone portable binaries & uninstall script)
-            - **Integrity Checksums**: `SHA256SUMS.txt`
+          name: OOS-Lite v0.2.3 - Core Durability and Recovery Fixes
+          body_path: release_notes.md
           draft: false
           prerelease: false
           files: |
-            dist/OOS-Lite-Setup-*.exe
-            dist/oos-lite-windows-x86_64.zip
-            dist/oos-lite-linux-x86_64.tar.gz
+            dist/OOS-Lite-Setup-v0.2.3.exe
+            dist/oos-lite-windows-x86_64-v0.2.3.zip
+            dist/oos-lite-linux-x86_64-v0.2.3.tar.gz
             dist/SHA256SUMS.txt

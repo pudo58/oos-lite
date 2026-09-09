@@ -79,15 +79,23 @@ fn test_real_subprocess_kill_and_recovery() {
 
     // Verify all 5 fsynced chunks are intact and recoverable
     for (i, id) in committed_ids.iter().enumerate() {
-        assert!(store.has_chunk(id), "Fsynced chunk {} was lost after crash!", id);
-        let data = store.get_chunk(id).expect("Failed to read fsynced chunk after recovery");
+        assert!(
+            store.has_chunk(id),
+            "Fsynced chunk {} was lost after crash!",
+            id
+        );
+        let data = store
+            .get_chunk(id)
+            .expect("Failed to read fsynced chunk after recovery");
         let expected = format!("CRITICAL_FSYNCED_CHUNK_NUMBER_{}", i).into_bytes();
         assert_eq!(data, expected, "Data corrupted for chunk {}", id);
     }
 
     // Verify store can continue writing without errors after crash recovery
     let resume_data = b"Clean chunk written after crash recovery";
-    let (new_id, is_new) = store.put_chunk(resume_data).expect("put after crash failed");
+    let (new_id, is_new) = store
+        .put_chunk(resume_data)
+        .expect("put after crash failed");
     assert!(is_new);
     assert_eq!(store.get_chunk(&new_id).unwrap(), resume_data);
 }
@@ -96,12 +104,17 @@ fn test_real_subprocess_kill_and_recovery() {
 // Milestone 5: Full Write Path Crash Consistency & WAL Tests
 // =========================================================================
 
-use std::fs;
 use oos_lite_core::wal::{Wal, WalPutPayload};
 use oos_lite_core::{Manifest, ObjectId, StorageEngine};
+use std::fs;
 
 /// Helper: run subprocess to simulate abrupt crash (kill -9) at specified crash point
-fn run_subprocess_put(store_path: &str, file_path: &str, name: &str, crash_at: Option<&str>) -> bool {
+fn run_subprocess_put(
+    store_path: &str,
+    file_path: &str,
+    name: &str,
+    crash_at: Option<&str>,
+) -> bool {
     let current_exe = std::env::current_exe().expect("Failed to get current exe");
     let mut cmd = Command::new(current_exe);
     cmd.arg("--exact")
@@ -178,13 +191,34 @@ fn test_milestone5_b_kill_at_3_different_points_in_write_path() {
 
     // Subprocess should crash / abort
     let success = run_subprocess_put(store_str, f1_str, "file1.txt", Some("after_wal_fsync"));
-    assert!(!success, "Subprocess should have aborted at after_wal_fsync");
+    assert!(
+        !success,
+        "Subprocess should have aborted at after_wal_fsync"
+    );
+
+    {
+        let wal = Wal::open(store_path.join("wal")).unwrap();
+        let records = wal.read_uncheckpointed_records().unwrap();
+        assert_eq!(records.len(), 1);
+        match &records[0].payload {
+            oos_lite_core::wal::WalRecordPayload::PutObject(put) => {
+                assert!(
+                    put.chunks.is_empty(),
+                    "new engine WAL records must be metadata-only"
+                );
+                assert!(!put.manifest.chunks.is_empty());
+            }
+            other => panic!("expected put record, got {other:?}"),
+        }
+    }
 
     // Reopening engine should replay WAL and recover the write completely
     {
         let engine = StorageEngine::open(&store_path).expect("Engine should recover from WAL");
         let out1 = dir.path().join("out1.txt");
-        let len = engine.get_file("file1.txt", &out1).expect("file1.txt must be recovered");
+        let len = engine
+            .get_file("file1.txt", &out1)
+            .expect("file1.txt must be recovered");
         assert_eq!(len, content1.len() as u64);
         assert_eq!(fs::read(&out1).unwrap(), content1);
     }
@@ -198,13 +232,18 @@ fn test_milestone5_b_kill_at_3_different_points_in_write_path() {
     let f2_str = f2.to_str().unwrap();
 
     let success = run_subprocess_put(store_str, f2_str, "file2.txt", Some("after_chunk_write"));
-    assert!(!success, "Subprocess should have aborted at after_chunk_write");
+    assert!(
+        !success,
+        "Subprocess should have aborted at after_chunk_write"
+    );
 
     // Reopening engine should recover file2.txt from WAL
     {
         let engine = StorageEngine::open(&store_path).expect("Engine should recover from WAL");
         let out2 = dir.path().join("out2.txt");
-        let len = engine.get_file("file2.txt", &out2).expect("file2.txt must be recovered");
+        let len = engine
+            .get_file("file2.txt", &out2)
+            .expect("file2.txt must be recovered");
         assert_eq!(len, content2.len() as u64);
         assert_eq!(fs::read(&out2).unwrap(), content2);
     }
@@ -217,27 +256,45 @@ fn test_milestone5_b_kill_at_3_different_points_in_write_path() {
     fs::write(&f3, content3).unwrap();
     let f3_str = f3.to_str().unwrap();
 
-    let success = run_subprocess_put(store_str, f3_str, "file3.txt", Some("after_metadata_update"));
-    assert!(!success, "Subprocess should have aborted at after_metadata_update");
+    let success = run_subprocess_put(
+        store_str,
+        f3_str,
+        "file3.txt",
+        Some("after_metadata_update"),
+    );
+    assert!(
+        !success,
+        "Subprocess should have aborted at after_metadata_update"
+    );
 
     // Reopening engine should replay idempotently and checkpoint
     {
         let engine = StorageEngine::open(&store_path).expect("Engine should recover cleanly");
         let out3 = dir.path().join("out3.txt");
-        let len = engine.get_file("file3.txt", &out3).expect("file3.txt must be readable");
+        let len = engine
+            .get_file("file3.txt", &out3)
+            .expect("file3.txt must be readable");
         assert_eq!(len, content3.len() as u64);
         assert_eq!(fs::read(&out3).unwrap(), content3);
 
         // Verify version history is not duplicated
         let versions = engine.get_versions("file3.txt").unwrap();
-        assert_eq!(versions.len(), 1, "Should not duplicate version after idempotent replay");
+        assert_eq!(
+            versions.len(),
+            1,
+            "Should not duplicate version after idempotent replay"
+        );
     }
 
     // Verify criterion: 0 writes that fsynced WAL were lost
     {
         let engine = StorageEngine::open(&store_path).unwrap();
         let list = engine.list_files().unwrap();
-        assert_eq!(list.len(), 3, "All 3 files must be present and accounted for");
+        assert_eq!(
+            list.len(),
+            3,
+            "All 3 files must be present and accounted for"
+        );
     }
 }
 
@@ -279,6 +336,41 @@ fn test_milestone5_c_corrupted_wal_record_detected() {
 }
 
 #[test]
+fn test_metadata_only_wal_rejects_missing_manifest_chunk() {
+    let dir = tempdir().unwrap();
+    let store_path = dir.path().join("missing-chunk-store");
+    {
+        let _engine = StorageEngine::open(&store_path).unwrap();
+    }
+
+    let missing_data = b"chunk deliberately absent from segments";
+    let missing_id = ChunkId::from_data(missing_data);
+    let manifest = Manifest::new(
+        vec![missing_id],
+        missing_data.len() as u64,
+        *blake3::hash(missing_data).as_bytes(),
+    );
+    let payload = WalPutPayload {
+        name: "missing.txt".into(),
+        object_id: ObjectId::generate(),
+        version: 1,
+        manifest,
+        chunks: Vec::new(),
+    };
+    let mut wal = Wal::open(store_path.join("wal")).unwrap();
+    wal.append_put_and_sync(&payload).unwrap();
+    drop(wal);
+
+    match StorageEngine::open(&store_path) {
+        Err(oos_lite_core::error::OosLiteError::WalRecovery(message)) => {
+            assert!(message.contains("missing durable chunk"));
+        }
+        Err(other) => panic!("expected WAL recovery error, got {other:?}"),
+        Ok(_) => panic!("recovery must not commit metadata referencing a missing chunk"),
+    }
+}
+
+#[test]
 fn test_milestone5_d_idempotent_recovery_repeated_twice() {
     let dir = tempdir().unwrap();
     let store_path = dir.path().join("idempotent_store");
@@ -289,7 +381,12 @@ fn test_milestone5_d_idempotent_recovery_repeated_twice() {
     fs::write(&f, content).unwrap();
 
     // Crash after WAL fsync so that WAL replay is required
-    let success = run_subprocess_put(store_str, f.to_str().unwrap(), "idem.txt", Some("after_wal_fsync"));
+    let success = run_subprocess_put(
+        store_str,
+        f.to_str().unwrap(),
+        "idem.txt",
+        Some("after_wal_fsync"),
+    );
     assert!(!success);
 
     // Recovery Run 1

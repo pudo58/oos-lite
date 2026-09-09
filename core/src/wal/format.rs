@@ -8,6 +8,45 @@ use crate::object::ObjectId;
 pub const WAL_MAGIC: [u8; 4] = *b"OOSW";
 pub const WAL_HEADER_SIZE: usize = 4 + 8 + 1 + 4 + 4; // 21 bytes
 
+fn checked_put_payload_len(
+    name_len: usize,
+    manifest_len: usize,
+    chunk_lengths: impl IntoIterator<Item = usize>,
+    encrypted: bool,
+) -> Result<usize> {
+    let mut total = 2usize
+        .checked_add(name_len)
+        .and_then(|n| n.checked_add(16 + 4 + 4))
+        .and_then(|n| n.checked_add(manifest_len))
+        .and_then(|n| n.checked_add(4))
+        .ok_or_else(|| OosLiteError::WalRecovery("WAL payload size overflow".into()))?;
+
+    for chunk_len in chunk_lengths {
+        u32::try_from(chunk_len).map_err(|_| {
+            OosLiteError::WalRecovery(format!(
+                "WAL chunk is too large: {chunk_len} bytes exceeds u32 limit"
+            ))
+        })?;
+        total = total
+            .checked_add(32 + 4)
+            .and_then(|n| n.checked_add(chunk_len))
+            .ok_or_else(|| OosLiteError::WalRecovery("WAL payload size overflow".into()))?;
+    }
+
+    if encrypted {
+        total = total
+            .checked_add(24 + 16)
+            .ok_or_else(|| OosLiteError::WalRecovery("WAL payload size overflow".into()))?;
+    }
+
+    u32::try_from(total).map_err(|_| {
+        OosLiteError::WalRecovery(format!(
+            "WAL payload is too large: {total} bytes exceeds u32 limit"
+        ))
+    })?;
+    Ok(total)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum WalRecordType {
@@ -83,22 +122,56 @@ impl WalRecord {
         put: &WalPutPayload,
         vault_key: Option<&crate::crypto::VaultKey>,
     ) -> Result<Vec<u8>> {
-        let mut payload_buf = Vec::new();
         let name_bytes = put.name.as_bytes();
-        payload_buf.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+        let name_len = u16::try_from(name_bytes.len()).map_err(|_| {
+            OosLiteError::WalRecovery(format!(
+                "WAL name is too long: {} bytes exceeds u16 limit",
+                name_bytes.len()
+            ))
+        })?;
+
+        let manifest_bytes = put.manifest.to_bytes();
+        let manifest_len = u32::try_from(manifest_bytes.len()).map_err(|_| {
+            OosLiteError::WalRecovery(format!(
+                "WAL manifest is too large: {} bytes exceeds u32 limit",
+                manifest_bytes.len()
+            ))
+        })?;
+        let chunk_count = u32::try_from(put.chunks.len()).map_err(|_| {
+            OosLiteError::WalRecovery(format!(
+                "WAL chunk count {} exceeds u32 limit",
+                put.chunks.len()
+            ))
+        })?;
+
+        let plaintext_len = checked_put_payload_len(
+            name_bytes.len(),
+            manifest_bytes.len(),
+            put.chunks.iter().map(|(_, data)| data.len()),
+            false,
+        )?;
+        checked_put_payload_len(
+            name_bytes.len(),
+            manifest_bytes.len(),
+            put.chunks.iter().map(|(_, data)| data.len()),
+            vault_key.is_some(),
+        )?;
+
+        let mut payload_buf = Vec::with_capacity(plaintext_len);
+        payload_buf.extend_from_slice(&name_len.to_le_bytes());
         payload_buf.extend_from_slice(name_bytes);
 
         payload_buf.extend_from_slice(put.object_id.as_bytes());
         payload_buf.extend_from_slice(&put.version.to_le_bytes());
 
-        let manifest_bytes = put.manifest.to_bytes();
-        payload_buf.extend_from_slice(&(manifest_bytes.len() as u32).to_le_bytes());
+        payload_buf.extend_from_slice(&manifest_len.to_le_bytes());
         payload_buf.extend_from_slice(&manifest_bytes);
 
-        payload_buf.extend_from_slice(&(put.chunks.len() as u32).to_le_bytes());
+        payload_buf.extend_from_slice(&chunk_count.to_le_bytes());
         for (chunk_id, chunk_data) in &put.chunks {
             payload_buf.extend_from_slice(chunk_id.as_bytes());
-            payload_buf.extend_from_slice(&(chunk_data.len() as u32).to_le_bytes());
+            let data_len = u32::try_from(chunk_data.len()).expect("validated above");
+            payload_buf.extend_from_slice(&data_len.to_le_bytes());
             payload_buf.extend_from_slice(chunk_data);
         }
 
@@ -127,7 +200,12 @@ impl WalRecord {
             payload_buf
         };
 
-        let payload_len = final_payload.len() as u32;
+        let payload_len = u32::try_from(final_payload.len()).map_err(|_| {
+            OosLiteError::WalRecovery(format!(
+                "WAL payload is too large: {} bytes exceeds u32 limit",
+                final_payload.len()
+            ))
+        })?;
         let crc = crc32fast::hash(&final_payload);
 
         let mut record_buf = Vec::with_capacity(WAL_HEADER_SIZE + final_payload.len());
@@ -141,7 +219,10 @@ impl WalRecord {
         Ok(record_buf)
     }
 
-    pub fn encode_with_vault(&self, vault_key: Option<&crate::crypto::VaultKey>) -> Result<Vec<u8>> {
+    pub fn encode_with_vault(
+        &self,
+        vault_key: Option<&crate::crypto::VaultKey>,
+    ) -> Result<Vec<u8>> {
         match &self.payload {
             WalRecordPayload::PutObject(put) => Self::encode_put(self.lsn, put, vault_key),
             WalRecordPayload::Checkpoint(lsn) => {
@@ -168,7 +249,10 @@ impl WalRecord {
         Self::decode_with_vault(buf, None)
     }
 
-    pub fn decode_with_vault(buf: &[u8], vault_key: Option<&crate::crypto::VaultKey>) -> Result<(Self, usize)> {
+    pub fn decode_with_vault(
+        buf: &[u8],
+        vault_key: Option<&crate::crypto::VaultKey>,
+    ) -> Result<(Self, usize)> {
         if buf.len() < WAL_HEADER_SIZE {
             return Err(OosLiteError::WalRecovery(
                 "Buffer too short for WAL header".into(),
@@ -176,9 +260,7 @@ impl WalRecord {
         }
 
         if buf[0..4] != WAL_MAGIC {
-            return Err(OosLiteError::WalRecovery(
-                "Invalid WAL magic bytes".into(),
-            ));
+            return Err(OosLiteError::WalRecovery("Invalid WAL magic bytes".into()));
         }
 
         let lsn = u64::from_le_bytes(buf[4..12].try_into().unwrap());
@@ -188,9 +270,7 @@ impl WalRecord {
 
         let total_size = WAL_HEADER_SIZE + payload_len;
         if buf.len() < total_size {
-            return Err(OosLiteError::WalRecovery(
-                "Incomplete WAL payload".into(),
-            ));
+            return Err(OosLiteError::WalRecovery("Incomplete WAL payload".into()));
         }
 
         let payload_slice = &buf[WAL_HEADER_SIZE..total_size];
@@ -229,15 +309,21 @@ impl WalRecord {
         let mut cursor = Cursor::new(plaintext_slice);
         let payload = match record_type {
             WalRecordType::PutObject | WalRecordType::EncryptedPutObject => {
-                let remaining = plaintext_slice.len().saturating_sub(cursor.position() as usize);
+                let remaining = plaintext_slice
+                    .len()
+                    .saturating_sub(cursor.position() as usize);
                 if remaining < 2 {
-                    return Err(OosLiteError::WalRecovery("Truncated WAL name length".into()));
+                    return Err(OosLiteError::WalRecovery(
+                        "Truncated WAL name length".into(),
+                    ));
                 }
                 let mut name_len_buf = [0u8; 2];
                 cursor.read_exact(&mut name_len_buf)?;
                 let name_len = u16::from_le_bytes(name_len_buf) as usize;
 
-                let remaining = plaintext_slice.len().saturating_sub(cursor.position() as usize);
+                let remaining = plaintext_slice
+                    .len()
+                    .saturating_sub(cursor.position() as usize);
                 if name_len > remaining {
                     return Err(OosLiteError::WalRecovery(format!(
                         "WAL name length {name_len} exceeds remaining payload {remaining}"
@@ -250,9 +336,13 @@ impl WalRecord {
                     OosLiteError::WalRecovery(format!("Invalid UTF-8 in WAL name: {e}"))
                 })?;
 
-                let remaining = plaintext_slice.len().saturating_sub(cursor.position() as usize);
+                let remaining = plaintext_slice
+                    .len()
+                    .saturating_sub(cursor.position() as usize);
                 if remaining < 16 + 4 + 4 {
-                    return Err(OosLiteError::WalRecovery("Truncated WAL object header".into()));
+                    return Err(OosLiteError::WalRecovery(
+                        "Truncated WAL object header".into(),
+                    ));
                 }
 
                 let mut oid_buf = [0u8; 16];
@@ -267,7 +357,9 @@ impl WalRecord {
                 cursor.read_exact(&mut manifest_len_buf)?;
                 let manifest_len = u32::from_le_bytes(manifest_len_buf) as usize;
 
-                let remaining = plaintext_slice.len().saturating_sub(cursor.position() as usize);
+                let remaining = plaintext_slice
+                    .len()
+                    .saturating_sub(cursor.position() as usize);
                 if manifest_len > remaining {
                     return Err(OosLiteError::WalRecovery(format!(
                         "WAL manifest length {manifest_len} exceeds remaining payload {remaining}"
@@ -278,9 +370,13 @@ impl WalRecord {
                 cursor.read_exact(&mut manifest_buf)?;
                 let manifest = Manifest::from_bytes(&manifest_buf)?;
 
-                let remaining = plaintext_slice.len().saturating_sub(cursor.position() as usize);
+                let remaining = plaintext_slice
+                    .len()
+                    .saturating_sub(cursor.position() as usize);
                 if remaining < 4 {
-                    return Err(OosLiteError::WalRecovery("Truncated WAL chunk count".into()));
+                    return Err(OosLiteError::WalRecovery(
+                        "Truncated WAL chunk count".into(),
+                    ));
                 }
 
                 let mut chunk_count_buf = [0u8; 4];
@@ -288,7 +384,9 @@ impl WalRecord {
                 let chunk_count = u32::from_le_bytes(chunk_count_buf) as usize;
 
                 // Each chunk requires at least 32 bytes for ChunkId + 4 bytes for data_len = 36 bytes
-                let remaining = plaintext_slice.len().saturating_sub(cursor.position() as usize);
+                let remaining = plaintext_slice
+                    .len()
+                    .saturating_sub(cursor.position() as usize);
                 if chunk_count > remaining / 36 {
                     return Err(OosLiteError::WalRecovery(format!(
                         "WAL chunk count {chunk_count} exceeds payload capacity (remaining: {remaining} bytes)"
@@ -297,9 +395,13 @@ impl WalRecord {
 
                 let mut chunks = Vec::with_capacity(chunk_count.min(1024));
                 for _ in 0..chunk_count {
-                    let remaining = plaintext_slice.len().saturating_sub(cursor.position() as usize);
+                    let remaining = plaintext_slice
+                        .len()
+                        .saturating_sub(cursor.position() as usize);
                     if remaining < 36 {
-                        return Err(OosLiteError::WalRecovery("Truncated WAL chunk entry".into()));
+                        return Err(OosLiteError::WalRecovery(
+                            "Truncated WAL chunk entry".into(),
+                        ));
                     }
 
                     let mut cid_buf = [0u8; 32];
@@ -310,7 +412,9 @@ impl WalRecord {
                     cursor.read_exact(&mut data_len_buf)?;
                     let data_len = u32::from_le_bytes(data_len_buf) as usize;
 
-                    let remaining = plaintext_slice.len().saturating_sub(cursor.position() as usize);
+                    let remaining = plaintext_slice
+                        .len()
+                        .saturating_sub(cursor.position() as usize);
                     if data_len > remaining {
                         return Err(OosLiteError::WalRecovery(format!(
                             "WAL chunk data length {data_len} exceeds remaining payload {remaining}"
@@ -332,9 +436,13 @@ impl WalRecord {
                 })
             }
             WalRecordType::Checkpoint => {
-                let remaining = plaintext_slice.len().saturating_sub(cursor.position() as usize);
+                let remaining = plaintext_slice
+                    .len()
+                    .saturating_sub(cursor.position() as usize);
                 if remaining < 8 {
-                    return Err(OosLiteError::WalRecovery("Truncated WAL checkpoint LSN".into()));
+                    return Err(OosLiteError::WalRecovery(
+                        "Truncated WAL checkpoint LSN".into(),
+                    ));
                 }
                 let mut lsn_buf = [0u8; 8];
                 cursor.read_exact(&mut lsn_buf)?;
@@ -343,5 +451,37 @@ impl WalRecord {
         };
 
         Ok((WalRecord { lsn, payload }, total_size))
+    }
+}
+
+#[cfg(test)]
+mod length_tests {
+    use super::{checked_put_payload_len, WalPutPayload, WalRecord};
+    use crate::manifest::Manifest;
+    use crate::object::ObjectId;
+
+    #[test]
+    fn rejects_payload_larger_than_u32_without_allocating_it() {
+        let result = checked_put_payload_len(8, 64, [u32::MAX as usize], false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn accounts_for_encryption_overhead() {
+        let max_plaintext = u32::MAX as usize - 39;
+        assert!(checked_put_payload_len(0, max_plaintext - 30, [], false).is_ok());
+        assert!(checked_put_payload_len(0, max_plaintext - 30, [], true).is_err());
+    }
+
+    #[test]
+    fn rejects_name_larger_than_u16_without_truncating_length() {
+        let put = WalPutPayload {
+            name: "x".repeat(u16::MAX as usize + 1),
+            object_id: ObjectId::generate(),
+            version: 1,
+            manifest: Manifest::new(Vec::new(), 0, [0u8; 32]),
+            chunks: Vec::new(),
+        };
+        assert!(WalRecord::encode_put(1, &put, None).is_err());
     }
 }

@@ -1,16 +1,16 @@
+use fs2::FileExt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use fs2::FileExt;
 use tracing::{info, warn};
 
 use crate::chunk::{ChunkId, StreamChunker};
 use crate::crypto::VaultKey;
 use crate::error::{OosLiteError, Result};
-use crate::index::MetadataStore;
 use crate::gc::{GarbageCollector, GcStats};
+use crate::index::MetadataStore;
 use crate::manifest::Manifest;
 use crate::object::{ObjectId, ObjectRecord, ObjectVersion};
 use crate::segment::SegmentStore;
@@ -59,7 +59,11 @@ pub fn validate_logical_name(name: &str) -> Result<()> {
         });
     }
 
-    if trimmed.contains('\0') || trimmed.contains('\r') || trimmed.contains('\n') || trimmed.contains(':') {
+    if trimmed.contains('\0')
+        || trimmed.contains('\r')
+        || trimmed.contains('\n')
+        || trimmed.contains(':')
+    {
         return Err(OosLiteError::InvalidName {
             name: name.to_string(),
             reason: "Logical file name cannot contain control characters or colons".to_string(),
@@ -83,17 +87,42 @@ pub fn validate_logical_name(name: &str) -> Result<()> {
             }
             std::path::Component::Normal(os_str) => {
                 let comp_str = os_str.to_string_lossy();
-                let stem = comp_str.split('.').next().unwrap_or("").to_ascii_uppercase();
+                let stem = comp_str
+                    .split('.')
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_uppercase();
                 let is_dos_device = matches!(
                     stem.as_str(),
-                    "CON" | "PRN" | "AUX" | "NUL"
-                        | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
-                        | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+                    "CON"
+                        | "PRN"
+                        | "AUX"
+                        | "NUL"
+                        | "COM1"
+                        | "COM2"
+                        | "COM3"
+                        | "COM4"
+                        | "COM5"
+                        | "COM6"
+                        | "COM7"
+                        | "COM8"
+                        | "COM9"
+                        | "LPT1"
+                        | "LPT2"
+                        | "LPT3"
+                        | "LPT4"
+                        | "LPT5"
+                        | "LPT6"
+                        | "LPT7"
+                        | "LPT8"
+                        | "LPT9"
                 );
                 if is_dos_device {
                     return Err(OosLiteError::InvalidName {
                         name: name.to_string(),
-                        reason: format!("Reserved Windows device name '{stem}' not allowed in path components"),
+                        reason: format!(
+                            "Reserved Windows device name '{stem}' not allowed in path components"
+                        ),
                     });
                 }
             }
@@ -170,6 +199,25 @@ pub struct StorageEngine {
 }
 
 impl StorageEngine {
+    fn acquire_store_lock(root: &Path) -> Result<File> {
+        fs::create_dir_all(root)?;
+        let lock_path = root.join("store.lock");
+        let lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+
+        lock_file.try_lock_exclusive().map_err(|_| {
+            OosLiteError::StoreLocked(format!(
+                "Store at '{}' is already opened by another process (single-instance only)",
+                root.display()
+            ))
+        })?;
+        Ok(lock_file)
+    }
+
     /// Opens the store without a password.
     /// Checks if a store directory contains existing storage data (segments, metadata, or WAL).
     pub fn is_store_empty(root: &Path) -> Result<bool> {
@@ -219,10 +267,11 @@ impl StorageEngine {
     /// If `<root_dir>/vault.key` exists, fails with `PasswordRequired`.
     pub fn open<P: AsRef<Path>>(root_dir: P) -> Result<Self> {
         let root = root_dir.as_ref();
+        let lock_file = Self::acquire_store_lock(root)?;
         if root.join("vault.key").exists() {
             return Err(OosLiteError::PasswordRequired);
         }
-        Self::open_internal(root, None)
+        Self::open_internal(root, None, lock_file)
     }
 
     /// Opens an encrypted store with a passphrase.
@@ -232,6 +281,7 @@ impl StorageEngine {
     ///   - If the store is empty, creates a new vault.key atomically and initializes the encrypted store.
     pub fn open_with_password<P: AsRef<Path>>(root_dir: P, password: &str) -> Result<Self> {
         let root = root_dir.as_ref();
+        let lock_file = Self::acquire_store_lock(root)?;
         let vault_path = root.join("vault.key");
         let vk = if vault_path.exists() {
             let bytes = fs::read(&vault_path)?;
@@ -250,13 +300,14 @@ impl StorageEngine {
             crate::crypto::write_vault_file_atomic(&vault_path, &vault_bytes)?;
             vk
         };
-        Self::open_internal(root, Some(Arc::new(vk)))
+        Self::open_internal(root, Some(Arc::new(vk)), lock_file)
     }
 
     /// Explicitly initializes a new encrypted store with a passphrase.
     /// Fails if vault.key already exists or if store already contains unencrypted data.
     pub fn init_encrypted<P: AsRef<Path>>(root_dir: P, password: &str) -> Result<Self> {
         let root = root_dir.as_ref();
+        let lock_file = Self::acquire_store_lock(root)?;
         let vault_path = root.join("vault.key");
         if vault_path.exists() {
             return Err(OosLiteError::Internal(
@@ -274,7 +325,7 @@ impl StorageEngine {
         fs::create_dir_all(root)?;
         let (vk, vault_bytes) = VaultKey::create(password)?;
         crate::crypto::write_vault_file_atomic(&vault_path, &vault_bytes)?;
-        Self::open_internal(root, Some(Arc::new(vk)))
+        Self::open_internal(root, Some(Arc::new(vk)), lock_file)
     }
 
     /// Checks if this engine instance has encryption enabled.
@@ -282,24 +333,12 @@ impl StorageEngine {
         self.vault_key.is_some()
     }
 
-    fn open_internal(root_dir: &Path, vault_key: Option<Arc<VaultKey>>) -> Result<Self> {
+    fn open_internal(
+        root_dir: &Path,
+        vault_key: Option<Arc<VaultKey>>,
+        lock_file: File,
+    ) -> Result<Self> {
         let root_dir_buf = root_dir.to_path_buf();
-        fs::create_dir_all(&root_dir_buf)?;
-
-        // Exclusive file lock across processes
-        let lock_path = root_dir_buf.join("store.lock");
-        let lock_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&lock_path)?;
-
-        lock_file.try_lock_exclusive().map_err(|_| {
-            OosLiteError::StoreLocked(format!(
-                "Store at '{}' is already opened by another process (single-instance only)",
-                root_dir_buf.display()
-            ))
-        })?;
 
         let segments_dir = root_dir_buf.join("segments");
         let metadata_dir = root_dir_buf.join("metadata.db");
@@ -322,10 +361,25 @@ impl StorageEngine {
                     // Step 1: Replay chunks into SegmentStore (if not already present)
                     for (chunk_id, chunk_data) in &put.chunks {
                         if !chunk_data.is_empty() && !segment_store.has_chunk(chunk_id) {
-                            let _ = segment_store.put_chunk(chunk_data)?;
+                            let (actual_id, _) = segment_store.put_chunk(chunk_data)?;
+                            if &actual_id != chunk_id {
+                                return Err(OosLiteError::WalRecovery(format!(
+                                    "WAL chunk {} does not match its content hash {}",
+                                    chunk_id, actual_id
+                                )));
+                            }
                         }
                     }
                     segment_store.sync()?;
+
+                    for chunk_id in &put.manifest.chunks {
+                        if !segment_store.has_chunk(chunk_id) {
+                            return Err(OosLiteError::WalRecovery(format!(
+                                "WAL manifest references missing durable chunk {}",
+                                chunk_id
+                            )));
+                        }
+                    }
 
                     // Step 2: Replay manifest into MetadataStore
                     let manifest_id = metadata_store.save_manifest(&put.manifest)?;
@@ -418,14 +472,16 @@ impl StorageEngine {
         }
 
         // 1. Single-writer synchronization to prevent version race condition
-        let _put_guard = self.put_lock.lock().map_err(|e| {
-            OosLiteError::Internal(format!("StorageEngine put_lock poisoned: {e}"))
-        })?;
+        let _put_guard = self
+            .put_lock
+            .lock()
+            .map_err(|e| OosLiteError::Internal(format!("StorageEngine put_lock poisoned: {e}")))?;
 
         // 2. Prevent race condition with concurrent GC
-        let _op_guard = self.op_lock.read().map_err(|e| {
-            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
-        })?;
+        let _op_guard = self
+            .op_lock
+            .read()
+            .map_err(|e| OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}")))?;
 
         let file = open_safe_read(file_path)?;
         let reader = BufReader::new(file);
@@ -434,18 +490,19 @@ impl StorageEngine {
         let mut hasher = blake3::Hasher::new();
         let mut total_bytes = 0u64;
         let mut chunk_ids = Vec::new();
-        let mut new_chunks_for_wal = Vec::new();
+        let mut new_chunks = 0usize;
 
         while let Some(chunk) = stream_chunker.next_chunk()? {
             total_bytes += chunk.len() as u64;
             hasher.update(&chunk);
             let cid = ChunkId::from_data(&chunk);
             chunk_ids.push(cid);
-            if !self.segment_store.has_chunk(&cid) {
-                new_chunks_for_wal.push((cid, chunk));
+            let (_id, is_new) = self.segment_store.put_chunk(&chunk)?;
+            if is_new {
+                new_chunks += 1;
             }
-            // Deduplicated chunks are dropped immediately from memory here
         }
+        self.segment_store.sync()?;
 
         let content_hash = *hasher.finalize().as_bytes();
         let manifest = Manifest::new(chunk_ids.clone(), total_bytes, content_hash);
@@ -453,49 +510,48 @@ impl StorageEngine {
         // Determine ObjectId & version target
         let (object_id, version) = match self.metadata_store.resolve_name(name)? {
             Some(existing_id) => {
-                let existing = self.metadata_store.get_object(&existing_id)?.ok_or_else(|| {
-                    OosLiteError::Internal(format!(
-                        "Inconsistent state: Name {} points to non-existing Object {}",
-                        name, existing_id
-                    ))
-                })?;
-                let next_version = existing
-                    .latest_version
-                    .max(existing.versions.iter().map(|v| v.version).max().unwrap_or(0))
-                    + 1;
+                let existing = self
+                    .metadata_store
+                    .get_object(&existing_id)?
+                    .ok_or_else(|| {
+                        OosLiteError::Internal(format!(
+                            "Inconsistent state: Name {} points to non-existing Object {}",
+                            name, existing_id
+                        ))
+                    })?;
+                let next_version = existing.latest_version.max(
+                    existing
+                        .versions
+                        .iter()
+                        .map(|v| v.version)
+                        .max()
+                        .unwrap_or(0),
+                ) + 1;
                 (existing_id, next_version)
             }
             None => (ObjectId::generate(), 1),
         };
 
-        // Step 1: WAL append + fsync
+        // Chunks are durable before the metadata-only WAL commit. A crash before the
+        // WAL append can leave unreachable chunks, which the next GC safely reclaims.
         let wal_payload = WalPutPayload {
             name: name.to_string(),
             object_id,
             version,
             manifest: manifest.clone(),
-            chunks: new_chunks_for_wal,
+            chunks: Vec::new(),
         };
 
         let lsn = {
-            let mut wal_guard = self.wal.lock().map_err(|e| {
-                OosLiteError::Internal(format!("WAL mutex poisoned: {e}"))
-            })?;
+            let mut wal_guard = self
+                .wal
+                .lock()
+                .map_err(|e| OosLiteError::Internal(format!("WAL mutex poisoned: {e}")))?;
             wal_guard.append_put_and_sync(&wal_payload)?
         };
 
         check_crash_point("after_wal_fsync");
-
-        // Step 2: Write chunks into SegmentStore + sync directly from memory slices
-        let mut new_chunks = 0;
-        for (_cid, chunk_data) in &wal_payload.chunks {
-            let (_id, is_new) = self.segment_store.put_chunk(chunk_data)?;
-            if is_new {
-                new_chunks += 1;
-            }
-        }
         let dedup_chunks = chunk_ids.len().saturating_sub(new_chunks);
-        self.segment_store.sync()?;
 
         check_crash_point("after_chunk_write");
 
@@ -531,9 +587,10 @@ impl StorageEngine {
 
         // Step 6: Checkpoint WAL
         {
-            let mut wal_guard = self.wal.lock().map_err(|e| {
-                OosLiteError::Internal(format!("WAL mutex poisoned: {e}"))
-            })?;
+            let mut wal_guard = self
+                .wal
+                .lock()
+                .map_err(|e| OosLiteError::Internal(format!("WAL mutex poisoned: {e}")))?;
             wal_guard.checkpoint(lsn)?;
         }
 
@@ -669,9 +726,10 @@ impl StorageEngine {
         version: Option<u32>,
         out_path: P,
     ) -> Result<u64> {
-        let _op_guard = self.op_lock.read().map_err(|e| {
-            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
-        })?;
+        let _op_guard = self
+            .op_lock
+            .read()
+            .map_err(|e| OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}")))?;
 
         let manifest = if let Some(v) = version {
             let obj_id = if let Some(id) = self.metadata_store.resolve_name(target)? {
@@ -685,9 +743,10 @@ impl StorageEngine {
                 )));
             };
 
-            let record = self.metadata_store.get_object(&obj_id)?.ok_or_else(|| {
-                OosLiteError::ObjectNotFound(obj_id.to_string())
-            })?;
+            let record = self
+                .metadata_store
+                .get_object(&obj_id)?
+                .ok_or_else(|| OosLiteError::ObjectNotFound(obj_id.to_string()))?;
 
             let version_entry = record
                 .versions
@@ -734,13 +793,16 @@ impl StorageEngine {
     /// Creates an O(1) point-in-time snapshot of the entire name index namespace.
     /// Does NOT copy any physical chunks (zero-copy / reference-only).
     pub fn create_snapshot(&self, label: &str) -> Result<Snapshot> {
-        let _op_guard = self.op_lock.write().map_err(|e| {
-            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
-        })?;
+        let _op_guard = self
+            .op_lock
+            .write()
+            .map_err(|e| OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}")))?;
 
         let label = label.trim();
         if label.is_empty() {
-            return Err(OosLiteError::Internal("Snapshot label cannot be empty".to_string()));
+            return Err(OosLiteError::Internal(
+                "Snapshot label cannot be empty".to_string(),
+            ));
         }
 
         if self.metadata_store.get_snapshot(label)?.is_some() {
@@ -788,14 +850,16 @@ impl StorageEngine {
 
     /// Restores all files captured in a snapshot into target_dir.
     pub fn restore_snapshot<P: AsRef<Path>>(&self, label: &str, target_dir: P) -> Result<usize> {
-        let _op_guard = self.op_lock.read().map_err(|e| {
-            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
-        })?;
+        let _op_guard = self
+            .op_lock
+            .read()
+            .map_err(|e| OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}")))?;
 
         let label = label.trim();
-        let snapshot = self.metadata_store.get_snapshot(label)?.ok_or_else(|| {
-            OosLiteError::SnapshotNotFound(label.to_string())
-        })?;
+        let snapshot = self
+            .metadata_store
+            .get_snapshot(label)?
+            .ok_or_else(|| OosLiteError::SnapshotNotFound(label.to_string()))?;
 
         let target_dir = target_dir.as_ref();
         if target_dir.as_os_str().is_empty() {
@@ -894,7 +958,6 @@ impl StorageEngine {
         let total_chunks = self.segment_store.chunk_count();
         let unique_chunks_bytes = self.segment_store.unique_raw_bytes();
 
-
         let seg_disk = self.segment_store.physical_disk_bytes().unwrap_or(0);
         let meta_disk = dir_size(&self.root_dir.join("metadata.db"));
         let wal_disk = dir_size(&self.root_dir.join("wal"));
@@ -937,9 +1000,10 @@ impl StorageEngine {
 
     /// Deletes a file entry from the name index and cleans up its associated object record.
     pub fn delete_file(&self, name: &str) -> Result<bool> {
-        let _op_guard = self.op_lock.write().map_err(|e| {
-            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
-        })?;
+        let _op_guard = self
+            .op_lock
+            .write()
+            .map_err(|e| OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}")))?;
 
         let name = name.trim();
         if let Some(object_id) = self.metadata_store.delete_named_object(name)? {
@@ -952,9 +1016,10 @@ impl StorageEngine {
     }
 
     pub fn delete_prefix(&self, prefix: &str) -> Result<usize> {
-        let _op_guard = self.op_lock.write().map_err(|e| {
-            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
-        })?;
+        let _op_guard = self
+            .op_lock
+            .write()
+            .map_err(|e| OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}")))?;
 
         let all_files = self.metadata_store.list_named_objects()?;
         let mut count = 0;
@@ -974,9 +1039,10 @@ impl StorageEngine {
 
     /// Unbinds a file name from active tracking without deleting its ObjectRecord and history.
     pub fn unbind_file(&self, name: &str) -> Result<bool> {
-        let _op_guard = self.op_lock.write().map_err(|e| {
-            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
-        })?;
+        let _op_guard = self
+            .op_lock
+            .write()
+            .map_err(|e| OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}")))?;
 
         let name = name.trim();
         if let Some(object_id) = self.metadata_store.unbind_name(name)? {
@@ -990,9 +1056,10 @@ impl StorageEngine {
 
     /// Deletes a snapshot by label.
     pub fn delete_snapshot(&self, label: &str) -> Result<bool> {
-        let _op_guard = self.op_lock.write().map_err(|e| {
-            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
-        })?;
+        let _op_guard = self
+            .op_lock
+            .write()
+            .map_err(|e| OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}")))?;
 
         let deleted = self.metadata_store.delete_snapshot(label.trim())?;
         if deleted {
@@ -1005,14 +1072,16 @@ impl StorageEngine {
     /// Runs a full Mark-and-Sweep Garbage Collection cycle.
     pub fn gc(&self) -> Result<GcStats> {
         // 1. Serialize GC invocations to prevent staging directory corruption
-        let _gc_guard = self.gc_lock.lock().map_err(|e| {
-            OosLiteError::Internal(format!("StorageEngine gc_lock poisoned: {e}"))
-        })?;
+        let _gc_guard = self
+            .gc_lock
+            .lock()
+            .map_err(|e| OosLiteError::Internal(format!("StorageEngine gc_lock poisoned: {e}")))?;
 
         // 2. Block all concurrent Put operations during both Mark & Sweep phases
-        let _op_guard = self.op_lock.write().map_err(|e| {
-            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
-        })?;
+        let _op_guard = self
+            .op_lock
+            .write()
+            .map_err(|e| OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}")))?;
 
         GarbageCollector::collect(&self.segment_store, &self.metadata_store)
     }
@@ -1023,14 +1092,18 @@ impl StorageEngine {
         let new_name = new_name.trim();
         validate_logical_name(new_name)?;
 
-        let _put_guard = self.put_lock.lock().map_err(|e| {
-            OosLiteError::Internal(format!("StorageEngine put_lock poisoned: {e}"))
-        })?;
-        let _op_guard = self.op_lock.read().map_err(|e| {
-            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
-        })?;
+        let _put_guard = self
+            .put_lock
+            .lock()
+            .map_err(|e| OosLiteError::Internal(format!("StorageEngine put_lock poisoned: {e}")))?;
+        let _op_guard = self
+            .op_lock
+            .read()
+            .map_err(|e| OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}")))?;
 
-        let renamed = self.metadata_store.rename_name_binding(old_name, new_name)?;
+        let renamed = self
+            .metadata_store
+            .rename_name_binding(old_name, new_name)?;
         if renamed {
             self.metadata_store.flush()?;
             info!(
@@ -1046,12 +1119,14 @@ impl StorageEngine {
     /// Orphaned chunks will be reclaimed during the next Garbage Collection (`gc()`).
     pub fn prune_file_versions(&self, name: &str, keep_last_n: usize) -> Result<usize> {
         let name = name.trim();
-        let _put_guard = self.put_lock.lock().map_err(|e| {
-            OosLiteError::Internal(format!("StorageEngine put_lock poisoned: {e}"))
-        })?;
-        let _op_guard = self.op_lock.read().map_err(|e| {
-            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
-        })?;
+        let _put_guard = self
+            .put_lock
+            .lock()
+            .map_err(|e| OosLiteError::Internal(format!("StorageEngine put_lock poisoned: {e}")))?;
+        let _op_guard = self
+            .op_lock
+            .read()
+            .map_err(|e| OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}")))?;
 
         let obj_id = match self.metadata_store.resolve_name(name)? {
             Some(id) => id,
@@ -1104,12 +1179,14 @@ impl StorageEngine {
         let name = name.trim();
         validate_logical_name(name)?;
 
-        let _put_guard = self.put_lock.lock().map_err(|e| {
-            OosLiteError::Internal(format!("StorageEngine put_lock poisoned: {e}"))
-        })?;
-        let _op_guard = self.op_lock.read().map_err(|e| {
-            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
-        })?;
+        let _put_guard = self
+            .put_lock
+            .lock()
+            .map_err(|e| OosLiteError::Internal(format!("StorageEngine put_lock poisoned: {e}")))?;
+        let _op_guard = self
+            .op_lock
+            .read()
+            .map_err(|e| OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}")))?;
 
         let obj_id = self.metadata_store.resolve_name(name)?.ok_or_else(|| {
             OosLiteError::ObjectNotFound(format!("File '{}' not found in store", name))
