@@ -42,7 +42,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 # Verify and initialize a store
 oos-lite --version
-oos-lite --store "$HOME/.oos-store" init
+oos-lite --store-dir "$HOME/.oos-store" init
 ```
 
 To keep `~/.local/bin` on `PATH`, add the following line to `~/.bashrc` or `~/.zshrc`:
@@ -51,7 +51,7 @@ To keep `~/.local/bin` on `PATH`, add the following line to `~/.bashrc` or `~/.z
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-For an encrypted store, initialize with `oos-lite --store "$HOME/.oos-store" --password init`.
+For an encrypted store, initialize with `oos-lite --store-dir "$HOME/.oos-store" --password YOUR_PASSWORD init`.
 
 ### Release assets
 
