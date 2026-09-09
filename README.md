@@ -5,6 +5,7 @@
 [![Tests](https://img.shields.io/badge/tests-49%20passed%20%7C%20100%25-brightgreen.svg)]()
 [![Engine](https://img.shields.io/badge/storage-Append--Only%20Segments%20%2B%20Sled-success.svg)]()
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey.svg)]()
+[![Support OOS-Lite](https://img.shields.io/badge/support-SOL%20%7C%20USDT-087f5b.svg)](https://pudo58.github.io/oos-lite/support/)
 
 > **OOS-Lite** is a high-performance, embedded, content-addressed file storage engine written in Rust. It implements core principles of modern distributed storage architectures—immutable chunks, content-defined chunking (FastCDC), BLAKE3 content hashing, multi-versioning, instant zero-copy snapshots, redo-only WAL crash consistency, and memory-bounded garbage collection—packaged as an easy-to-use CLI and pure Rust library with an embedded real-time Web UI dashboard.
 
