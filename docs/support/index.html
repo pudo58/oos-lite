@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Support the continued development of OOS-Lite with SOL or USDT on Solana.">
+  <meta name="theme-color" content="#f7f8f5">
+  <title>Support OOS-Lite</title>
+  <link rel="icon" href="../../installer/app.ico">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../" aria-label="OOS-Lite repository">
+      <img src="../../installer/app.ico" alt="" width="36" height="36">
+      <span>OOS-Lite</span>
+    </a>
+    <a class="repo-link" href="https://github.com/pudo58/oos-lite" target="_blank" rel="noreferrer">
+      <i data-lucide="github" aria-hidden="true"></i>
+      GitHub
+    </a>
+  </header>
+
+  <main>
+    <section class="intro" aria-labelledby="page-title">
+      <p class="eyebrow">Support open-source development</p>
+      <h1 id="page-title">Buy OOS-Lite a coffee.</h1>
+      <p class="lead">Your support helps fund maintenance, testing, and new work on the content-addressed storage engine.</p>
+      <div class="project-note">
+        <span class="status-dot" aria-hidden="true"></span>
+        Independent, open-source, and built in Rust
+      </div>
+    </section>
+
+    <section class="payment" aria-labelledby="payment-title">
+      <div class="payment-heading">
+        <div>
+          <p class="eyebrow">Crypto contribution</p>
+          <h2 id="payment-title">Send on Solana</h2>
+        </div>
+        <span class="network-badge">SOLANA NETWORK</span>
+      </div>
+
+      <div class="asset-options" aria-label="Accepted assets">
+        <div class="asset">
+          <span class="asset-symbol sol">SOL</span>
+          <span><strong>Solana</strong><small>Native SOL</small></span>
+        </div>
+        <div class="asset">
+          <span class="asset-symbol usdt">₮</span>
+          <span><strong>USDT</strong><small>SPL token on Solana</small></span>
+        </div>
+      </div>
+
+      <div class="wallet-layout">
+        <div class="qr-wrap">
+          <img src="solana-wallet-qr.png" width="240" height="240" alt="QR code for the OOS-Lite Solana wallet address">
+          <span>Scan with a Solana-compatible wallet</span>
+        </div>
+
+        <div class="wallet-details">
+          <label for="wallet-address">Wallet address</label>
+          <div class="address-box">
+            <code id="wallet-address">GYqhL927sKcsF86PzQEiYQVnmTScT6LesMohD5ugkXzN</code>
+          </div>
+          <div class="actions">
+            <button class="primary-action" id="copy-address" type="button">
+              <i data-lucide="copy" aria-hidden="true"></i>
+              <span>Copy address</span>
+            </button>
+            <a class="secondary-action" href="https://solscan.io/account/GYqhL927sKcsF86PzQEiYQVnmTScT6LesMohD5ugkXzN" target="_blank" rel="noreferrer">
+              <i data-lucide="external-link" aria-hidden="true"></i>
+              View on Solscan
+            </a>
+          </div>
+          <p class="warning"><i data-lucide="triangle-alert" aria-hidden="true"></i><span>Only send SOL or USDT using the Solana network. Assets sent through another network may be permanently lost.</span></p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span>Thank you for supporting OOS-Lite.</span>
+    <span>Verify the full address before sending.</span>
+  </footer>
+
+  <div class="toast" id="toast" role="status" aria-live="polite">Address copied</div>
+  <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
