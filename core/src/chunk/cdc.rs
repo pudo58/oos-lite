@@ -135,6 +135,10 @@ impl<R: std::io::Read> StreamChunker<R> {
             }
         }
     }
+
+    pub fn into_inner(self) -> R {
+        self.reader
+    }
 }
 
 #[cfg(test)]

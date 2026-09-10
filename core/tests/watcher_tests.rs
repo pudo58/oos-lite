@@ -7,6 +7,20 @@ use tempfile::tempdir;
 use oos_lite_core::watcher::{WatcherConfig, WatcherService};
 use oos_lite_core::StorageEngine;
 
+fn wait_for_versions(engine: &StorageEngine, name: &str, expected: usize) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if engine
+            .get_versions(name)
+            .is_ok_and(|versions| versions.len() == expected)
+        {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
 #[test]
 fn test_watcher_debounce_and_auto_put() {
     let watch_dir = tempdir().unwrap();
@@ -28,26 +42,28 @@ fn test_watcher_debounce_and_auto_put() {
     thread::sleep(Duration::from_millis(50));
     fs::write(&file_path, b"Line 1\nLine 2\nLine 3 final\n").unwrap();
 
-    // 2. Wait for debounce (400ms) + margin
-    thread::sleep(Duration::from_millis(700));
+    // 2. Wait for the asynchronous initial scan/debounce worker to commit.
+    let first_committed = wait_for_versions(&engine, "notes.txt", 1);
 
     // Verify engine has exactly 1 version with the final content
-    let versions = engine.get_versions("notes.txt").unwrap();
-    assert_eq!(versions.len(), 1);
     let out = store_dir.path().join("out.txt");
-    engine.get_file("notes.txt", &out).unwrap();
-    assert_eq!(fs::read(&out).unwrap(), b"Line 1\nLine 2\nLine 3 final\n");
+    let first_content_matches = engine
+        .get_file("notes.txt", &out)
+        .is_ok_and(|_| fs::read(&out).unwrap() == b"Line 1\nLine 2\nLine 3 final\n");
 
     // 3. Wait until cooldown expires, then modify again
     thread::sleep(Duration::from_millis(900));
-    fs::write(&file_path, b"Line 1\nLine 2\nLine 3 final\nLine 4 new version\n").unwrap();
-    thread::sleep(Duration::from_millis(700));
-
-    // Verify engine now has version 2
-    let versions2 = engine.get_versions("notes.txt").unwrap();
-    assert_eq!(versions2.len(), 2);
+    fs::write(
+        &file_path,
+        b"Line 1\nLine 2\nLine 3 final\nLine 4 new version\n",
+    )
+    .unwrap();
+    let second_committed = wait_for_versions(&engine, "notes.txt", 2);
 
     handle.stop();
+    assert!(first_committed, "initial debounced version was not committed");
+    assert!(first_content_matches, "initial version did not contain final debounced content");
+    assert!(second_committed, "second version was not committed after cooldown");
 }
 
 #[test]
@@ -75,7 +91,11 @@ fn test_watcher_ignore_rules_and_oosignore() {
     fs::write(watch_dir.path().join("cache.secret_cache"), b"cache").unwrap();
 
     // Valid file
-    fs::write(watch_dir.path().join("valid_document.pdf"), b"real work content").unwrap();
+    fs::write(
+        watch_dir.path().join("valid_document.pdf"),
+        b"real work content",
+    )
+    .unwrap();
 
     let engine = Arc::new(StorageEngine::open(store_dir.path()).unwrap());
     let config = WatcherConfig::new(watch_dir.path());
@@ -110,31 +130,28 @@ fn test_watcher_rename_preserves_version_history() {
 
     let old_file = watch_dir.path().join("draft_report.docx");
     fs::write(&old_file, b"First draft content").unwrap();
-    thread::sleep(Duration::from_millis(500));
+    let first_committed = wait_for_versions(&engine, "draft_report.docx", 1);
 
     // Update draft to get version 2
     thread::sleep(Duration::from_millis(500));
     fs::write(&old_file, b"Second draft updated content").unwrap();
-    thread::sleep(Duration::from_millis(500));
-
-    let v_old = engine.get_versions("draft_report.docx").unwrap();
-    assert_eq!(v_old.len(), 2);
+    let second_committed = wait_for_versions(&engine, "draft_report.docx", 2);
 
     // Now rename draft_report.docx -> final_report.docx
     let new_file = watch_dir.path().join("final_report.docx");
     fs::rename(&old_file, &new_file).unwrap();
-    thread::sleep(Duration::from_millis(600));
+    let rename_committed = wait_for_versions(&engine, "final_report.docx", 2);
 
     // Under the new name final_report.docx, both version 1 and 2 must be preserved!
     let v_new = engine.get_versions("final_report.docx");
-    assert!(v_new.is_ok(), "Expected final_report.docx to exist");
-    let versions = v_new.unwrap();
-    assert_eq!(versions.len(), 2, "Must preserve previous 2 versions under new name!");
-
-    // And old name must no longer be directly bound
-    assert!(engine.get_versions("draft_report.docx").is_err());
+    let old_name_unbound = engine.get_versions("draft_report.docx").is_err();
 
     handle.stop();
+    assert!(first_committed, "first draft version was not committed");
+    assert!(second_committed, "second draft version was not committed");
+    assert!(rename_committed, "renamed file did not preserve both versions");
+    assert!(v_new.is_ok(), "Expected final_report.docx to exist");
+    assert!(old_name_unbound, "old logical name remained bound after rename");
 }
 
 #[test]
@@ -159,6 +176,68 @@ fn test_reconciliation_scanner_cold_start() {
 }
 
 #[test]
+fn test_reconciliation_detects_same_size_content_change() {
+    let watch_dir = tempdir().unwrap();
+    let store_dir = tempdir().unwrap();
+    let file_path = watch_dir.path().join("same-size.txt");
+    fs::write(&file_path, b"AAAA").unwrap();
+
+    let engine = Arc::new(StorageEngine::open(store_dir.path()).unwrap());
+    let service = WatcherService::new(
+        Arc::clone(&engine),
+        WatcherConfig::new(watch_dir.path()).with_throttle_ms(0),
+    );
+    service.reconciliation_scan().unwrap();
+
+    fs::write(&file_path, b"BBBB").unwrap();
+    service.reconciliation_scan().unwrap();
+
+    let versions = engine.get_versions("same-size.txt").unwrap();
+    assert_eq!(versions.len(), 2);
+    let output = store_dir.path().join("same-size-output.txt");
+    engine.get_file("same-size.txt", &output).unwrap();
+    assert_eq!(fs::read(output).unwrap(), b"BBBB");
+}
+
+#[test]
+fn test_reconciliation_unbinds_missed_delete() {
+    let watch_dir = tempdir().unwrap();
+    let store_dir = tempdir().unwrap();
+    let file_path = watch_dir.path().join("removed.txt");
+    fs::write(&file_path, b"keep history after delete").unwrap();
+
+    let engine = Arc::new(StorageEngine::open(store_dir.path()).unwrap());
+    let service = WatcherService::new(
+        Arc::clone(&engine),
+        WatcherConfig::new(watch_dir.path()).with_throttle_ms(0),
+    );
+    service.reconciliation_scan().unwrap();
+    fs::remove_file(&file_path).unwrap();
+    service.reconciliation_scan().unwrap();
+
+    assert!(engine
+        .list_files()
+        .unwrap()
+        .iter()
+        .all(|(name, _, _)| name != "removed.txt"));
+}
+
+#[test]
+fn test_watcher_rejects_store_overlap() {
+    let root = tempdir().unwrap();
+    let store_dir = root.path().join("store");
+    fs::create_dir_all(&store_dir).unwrap();
+    let engine = Arc::new(StorageEngine::open(&store_dir).unwrap());
+    let service = WatcherService::new(engine, WatcherConfig::new(root.path()));
+
+    let error = service
+        .start()
+        .err()
+        .expect("overlapping watcher must fail");
+    assert!(error.to_string().contains("must not overlap"));
+}
+
+#[test]
 fn test_prune_file_versions_and_gc() {
     let store_dir = tempdir().unwrap();
     let engine = StorageEngine::open(store_dir.path()).unwrap();
@@ -167,7 +246,11 @@ fn test_prune_file_versions_and_gc() {
 
     // Put 6 different versions
     for i in 1..=6 {
-        fs::write(&tmp, format!("Version {} distinct chunk payload content", i)).unwrap();
+        fs::write(
+            &tmp,
+            format!("Version {} distinct chunk payload content", i),
+        )
+        .unwrap();
         engine.put_file_named("sample.txt", &tmp).unwrap();
     }
 

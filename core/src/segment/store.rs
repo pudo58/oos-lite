@@ -301,6 +301,25 @@ impl SegmentStore {
         self.index.get(id)
     }
 
+    pub fn stored_bytes_for_chunks(
+        &self,
+        chunks: &std::collections::HashSet<ChunkId>,
+    ) -> (u64, u64) {
+        let mut raw_bytes = 0u64;
+        let mut payload_bytes = 0u64;
+        for chunk_id in chunks {
+            if let Some(location) = self.index.get(chunk_id) {
+                raw_bytes += location.raw_len as u64;
+                payload_bytes += location.payload_len as u64;
+            }
+        }
+        (raw_bytes, payload_bytes)
+    }
+
+    pub fn unique_stored_bytes(&self) -> u64 {
+        self.index.total_payload_bytes()
+    }
+
     pub fn clear_cache(&self) {
         self.reader.clear_cache();
     }

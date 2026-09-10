@@ -22,7 +22,6 @@ pub struct MountController {
     pub stop_flag: Option<Arc<AtomicBool>>,
 }
 
-#[derive(Default)]
 pub struct WatcherController {
     pub is_running: bool,
     pub watch_dir: Option<PathBuf>,
@@ -32,13 +31,34 @@ pub struct WatcherController {
     pub handle: Option<oos_lite_core::watcher::WatcherHandle>,
 }
 
+impl Default for WatcherController {
+    fn default() -> Self {
+        Self {
+            is_running: false,
+            watch_dir: None,
+            debounce_secs: 3,
+            cooldown_secs: 60,
+            throttle_ms: 10,
+            handle: None,
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct ApiWatcherStatus {
     running: bool,
+    phase: String,
     watched_dir: Option<String>,
     debounce_secs: u64,
     cooldown_secs: u64,
     throttle_ms: u64,
+    scanned_files: u64,
+    ingested_files: u64,
+    removed_files: u64,
+    pending_files: u64,
+    error_count: u64,
+    last_error: Option<String>,
+    last_sync_unix: Option<u64>,
     message: Option<String>,
 }
 
@@ -76,13 +96,18 @@ struct ApiMountStatus {
 
 #[derive(Serialize)]
 struct ApiStats {
+    engine_version: &'static str,
     total_chunks: usize,
+    live_chunks: usize,
     total_manifests: usize,
     total_objects: usize,
     total_snapshots: usize,
     logical_bytes: u64,
     latest_logical_bytes: u64,
     unique_chunks_bytes: u64,
+    live_unique_chunks_bytes: u64,
+    live_stored_bytes: u64,
+    reclaimable_stored_bytes: u64,
     physical_disk_bytes: u64,
     dedup_ratio: f64,
     space_savings_pct: f64,
@@ -450,6 +475,39 @@ pub fn is_origin_allowed(origin: &str) -> bool {
     }
 }
 
+#[cfg(windows)]
+fn select_folder_dialog() -> std::result::Result<Option<PathBuf>, String> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = 'Select a folder for OOS-Lite Auto-Vault'
+$dialog.ShowNewFolderButton = $true
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    [Console]::Write($dialog.SelectedPath)
+}
+"#;
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-STA", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|error| format!("Could not open folder picker: {error}"))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!selected.is_empty()).then(|| PathBuf::from(selected)))
+}
+
+#[cfg(not(windows))]
+fn select_folder_dialog() -> std::result::Result<Option<PathBuf>, String> {
+    Err("Native folder picker is currently available on Windows only".to_string())
+}
+
 fn handle_request(
     engine: Arc<StorageEngine>,
     mount_ctrl: Arc<Mutex<MountController>>,
@@ -528,13 +586,18 @@ fn handle_request(
         (Method::Get, "/api/stats") => {
             let s = engine.stats();
             let resp_data = ApiStats {
+                engine_version: env!("CARGO_PKG_VERSION"),
                 total_chunks: s.total_chunks,
+                live_chunks: s.live_chunks,
                 total_manifests: s.total_manifests,
                 total_objects: s.total_objects,
                 total_snapshots: s.total_snapshots,
                 logical_bytes: s.logical_bytes,
                 latest_logical_bytes: s.latest_logical_bytes,
                 unique_chunks_bytes: s.unique_chunks_bytes,
+                live_unique_chunks_bytes: s.live_unique_chunks_bytes,
+                live_stored_bytes: s.live_stored_bytes,
+                reclaimable_stored_bytes: s.reclaimable_stored_bytes,
                 physical_disk_bytes: s.physical_disk_bytes,
                 dedup_ratio: s.dedup_ratio,
                 space_savings_pct: s.space_savings_pct,
@@ -1261,8 +1324,31 @@ fn handle_request(
             }
         }
 
+        (Method::Post, "/api/dialog/select-folder") => {
+            match select_folder_dialog() {
+                Ok(Some(path)) => {
+                    let _ = request.respond(json_response(&serde_json::json!({
+                        "ok": true,
+                        "cancelled": false,
+                        "path": path.display().to_string(),
+                    })));
+                }
+                Ok(None) => {
+                    let _ = request.respond(json_response(&serde_json::json!({
+                        "ok": true,
+                        "cancelled": true,
+                        "path": null,
+                    })));
+                }
+                Err(error) => {
+                    let _ = request.respond(error_response(500, &error));
+                }
+            }
+        }
+
         (Method::Get, "/api/watcher/status") => {
             let mut ctrl = watcher_ctrl.lock().unwrap_or_else(|p| p.into_inner());
+            let snapshot = ctrl.handle.as_ref().map(|handle| handle.status());
             if let Some(ref h) = ctrl.handle {
                 ctrl.is_running = h.is_running();
             } else {
@@ -1270,10 +1356,18 @@ fn handle_request(
             }
             let resp = ApiWatcherStatus {
                 running: ctrl.is_running,
+                phase: snapshot.as_ref().map_or("stopped", |s| s.phase).to_string(),
                 watched_dir: ctrl.watch_dir.as_ref().map(|p| p.display().to_string()),
-                debounce_secs: if ctrl.debounce_secs == 0 { 3 } else { ctrl.debounce_secs },
-                cooldown_secs: if ctrl.cooldown_secs == 0 { 60 } else { ctrl.cooldown_secs },
-                throttle_ms: if ctrl.throttle_ms == 0 { 10 } else { ctrl.throttle_ms },
+                debounce_secs: ctrl.debounce_secs,
+                cooldown_secs: ctrl.cooldown_secs,
+                throttle_ms: ctrl.throttle_ms,
+                scanned_files: snapshot.as_ref().map_or(0, |s| s.scanned_files),
+                ingested_files: snapshot.as_ref().map_or(0, |s| s.ingested_files),
+                removed_files: snapshot.as_ref().map_or(0, |s| s.removed_files),
+                pending_files: snapshot.as_ref().map_or(0, |s| s.pending_files),
+                error_count: snapshot.as_ref().map_or(0, |s| s.error_count),
+                last_error: snapshot.as_ref().and_then(|s| s.last_error.clone()),
+                last_sync_unix: snapshot.as_ref().and_then(|s| s.last_sync_unix),
                 message: None,
             };
             let _ = request.respond(json_response(&resp));
@@ -1299,6 +1393,13 @@ fn handle_request(
             let debounce = req_data.debounce_secs.unwrap_or(3);
             let cooldown = req_data.cooldown_secs.unwrap_or(60);
             let throttle = req_data.throttle_ms.unwrap_or(10);
+            if !(1..=60).contains(&debounce)
+                || !(5..=600).contains(&cooldown)
+                || throttle > 500
+            {
+                let _ = request.respond(error_response(400, "Watcher parameters are outside their allowed ranges"));
+                return Ok(());
+            }
 
             let mut ctrl = watcher_ctrl.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(h) = ctrl.handle.take() {
@@ -1313,6 +1414,7 @@ fn handle_request(
             let service = oos_lite_core::watcher::WatcherService::new(Arc::clone(&engine), config);
             match service.start() {
                 Ok(handle) => {
+                    let snapshot = handle.status();
                     ctrl.is_running = true;
                     ctrl.watch_dir = Some(target_dir.clone());
                     ctrl.debounce_secs = debounce;
@@ -1322,16 +1424,31 @@ fn handle_request(
 
                     let resp = ApiWatcherStatus {
                         running: true,
+                        phase: snapshot.phase.to_string(),
                         watched_dir: Some(target_dir.display().to_string()),
                         debounce_secs: debounce,
                         cooldown_secs: cooldown,
                         throttle_ms: throttle,
+                        scanned_files: snapshot.scanned_files,
+                        ingested_files: snapshot.ingested_files,
+                        removed_files: snapshot.removed_files,
+                        pending_files: snapshot.pending_files,
+                        error_count: snapshot.error_count,
+                        last_error: snapshot.last_error,
+                        last_sync_unix: snapshot.last_sync_unix,
                         message: Some("Đã kích hoạt Auto-Vault Watcher thành công".to_string()),
                     };
                     let _ = request.respond(json_response(&resp));
                 }
                 Err(e) => {
-                    let _ = request.respond(error_response(500, &format!("Không thể khởi động Watcher: {}", e)));
+                    let (status, message) = match &e {
+                        oos_lite_core::error::OosLiteError::InvalidWatchScope(_) => (
+                            400,
+                            "Thư mục theo dõi không được chứa hoặc nằm trong kho OOS / Watched folder must not overlap the OOS store".to_string(),
+                        ),
+                        _ => (500, format!("Không thể khởi động Watcher: {}", e)),
+                    };
+                    let _ = request.respond(error_response(status, &message));
                 }
             }
         }
@@ -1344,10 +1461,18 @@ fn handle_request(
             ctrl.is_running = false;
             let resp = ApiWatcherStatus {
                 running: false,
+                phase: "stopped".to_string(),
                 watched_dir: ctrl.watch_dir.as_ref().map(|p| p.display().to_string()),
                 debounce_secs: ctrl.debounce_secs,
                 cooldown_secs: ctrl.cooldown_secs,
                 throttle_ms: ctrl.throttle_ms,
+                scanned_files: 0,
+                ingested_files: 0,
+                removed_files: 0,
+                pending_files: 0,
+                error_count: 0,
+                last_error: None,
+                last_sync_unix: None,
                 message: Some("Đã tạm dừng Auto-Vault Watcher".to_string()),
             };
             let _ = request.respond(json_response(&resp));

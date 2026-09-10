@@ -23,7 +23,7 @@ pub use manifest::Manifest;
 pub use object::{ObjectId, ObjectRecord, ObjectVersion};
 pub use snapshot::{Snapshot, SnapshotEntry};
 pub use vfs::{DecompressedChunkCache, VfsNode, VfsNodeType, VfsTree};
-pub use watcher::{WatcherConfig, WatcherHandle, WatcherService};
+pub use watcher::{WatcherConfig, WatcherHandle, WatcherService, WatcherStatusSnapshot};
 
 
 #[cfg(test)]

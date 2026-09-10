@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -37,6 +37,10 @@ pub struct EngineStats {
     pub logical_bytes: u64,
     pub latest_logical_bytes: u64,
     pub unique_chunks_bytes: u64,
+    pub live_chunks: usize,
+    pub live_unique_chunks_bytes: u64,
+    pub live_stored_bytes: u64,
+    pub reclaimable_stored_bytes: u64,
     pub physical_disk_bytes: u64,
     pub dedup_ratio: f64,
     pub space_savings_pct: f64,
@@ -131,6 +135,35 @@ pub fn open_safe_read(path: &Path) -> std::io::Result<File> {
 #[cfg(not(windows))]
 pub fn open_safe_read(path: &Path) -> std::io::Result<File> {
     File::open(path)
+}
+
+fn same_source_state(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    before.len() == after.len() && before.modified().ok() == after.modified().ok()
+}
+
+fn stable_file_hash(path: &Path) -> Result<([u8; 32], u64)> {
+    let file = open_safe_read(path)?;
+    let before = file.metadata()?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = blake3::Hasher::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 256 * 1024];
+
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        total += read as u64;
+    }
+
+    let after = reader.get_ref().metadata()?;
+    if !same_source_state(&before, &after) || total != after.len() {
+        return Err(OosLiteError::SourceChanged(path.display().to_string()));
+    }
+
+    Ok((*hasher.finalize().as_bytes(), total))
 }
 
 fn dir_size(path: &Path) -> u64 {
@@ -382,6 +415,23 @@ impl StorageEngine {
         &self.root_dir
     }
 
+    /// Checks the source bytes against the latest version without accepting an
+    /// unstable read from a file that is actively being modified.
+    pub fn source_matches_latest<P: AsRef<Path>>(&self, name: &str, path: P) -> Result<bool> {
+        let Some(object_id) = self.metadata_store.resolve_name(name)? else {
+            return Ok(false);
+        };
+        let Some(record) = self.metadata_store.get_object(&object_id)? else {
+            return Ok(false);
+        };
+        let Some(manifest) = self.metadata_store.get_manifest(record.latest_manifest_id())? else {
+            return Ok(false);
+        };
+
+        let (content_hash, total_size) = stable_file_hash(path.as_ref())?;
+        Ok(total_size == manifest.total_size && content_hash == manifest.content_hash)
+    }
+
     pub fn vault_key(&self) -> Option<&Arc<VaultKey>> {
         self.vault_key.as_ref()
     }
@@ -428,6 +478,7 @@ impl StorageEngine {
         })?;
 
         let file = open_safe_read(file_path)?;
+        let source_before = file.metadata()?;
         let reader = BufReader::new(file);
         let mut stream_chunker = StreamChunker::new(reader);
 
@@ -445,6 +496,12 @@ impl StorageEngine {
                 new_chunks_for_wal.push((cid, chunk));
             }
             // Deduplicated chunks are dropped immediately from memory here
+        }
+
+        let reader = stream_chunker.into_inner();
+        let source_after = reader.get_ref().metadata()?;
+        if !same_source_state(&source_before, &source_after) || total_bytes != source_after.len() {
+            return Err(OosLiteError::SourceChanged(file_path.display().to_string()));
         }
 
         let content_hash = *hasher.finalize().as_bytes();
@@ -894,20 +951,38 @@ impl StorageEngine {
         let total_chunks = self.segment_store.chunk_count();
         let unique_chunks_bytes = self.segment_store.unique_raw_bytes();
 
+        let (live_chunks, live_unique_chunks_bytes, live_stored_bytes) =
+            match GarbageCollector::mark(&self.metadata_store) {
+                Ok((reachable_chunks, _, _)) => {
+                    let (raw_bytes, stored_bytes) =
+                        self.segment_store.stored_bytes_for_chunks(&reachable_chunks);
+                    (reachable_chunks.len(), raw_bytes, stored_bytes)
+                }
+                Err(_) => (
+                    total_chunks,
+                    unique_chunks_bytes,
+                    self.segment_store.unique_stored_bytes(),
+                ),
+            };
+        let reclaimable_stored_bytes = self
+            .segment_store
+            .unique_stored_bytes()
+            .saturating_sub(live_stored_bytes);
+
 
         let seg_disk = self.segment_store.physical_disk_bytes().unwrap_or(0);
         let meta_disk = dir_size(&self.root_dir.join("metadata.db"));
         let wal_disk = dir_size(&self.root_dir.join("wal"));
         let physical_disk_bytes = seg_disk + meta_disk + wal_disk;
 
-        let dedup_ratio = if unique_chunks_bytes > 0 {
-            logical_bytes as f64 / unique_chunks_bytes as f64
+        let dedup_ratio = if live_unique_chunks_bytes > 0 {
+            logical_bytes as f64 / live_unique_chunks_bytes as f64
         } else {
             1.0
         };
 
-        let space_savings_pct = if logical_bytes > 0 && logical_bytes >= unique_chunks_bytes {
-            ((logical_bytes - unique_chunks_bytes) as f64 / logical_bytes as f64) * 100.0
+        let space_savings_pct = if logical_bytes > 0 && logical_bytes >= live_unique_chunks_bytes {
+            ((logical_bytes - live_unique_chunks_bytes) as f64 / logical_bytes as f64) * 100.0
         } else {
             0.0
         };
@@ -920,6 +995,10 @@ impl StorageEngine {
             logical_bytes,
             latest_logical_bytes,
             unique_chunks_bytes,
+            live_chunks,
+            live_unique_chunks_bytes,
+            live_stored_bytes,
+            reclaimable_stored_bytes,
             physical_disk_bytes,
             dedup_ratio,
             space_savings_pct,

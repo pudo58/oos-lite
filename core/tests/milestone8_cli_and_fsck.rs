@@ -115,6 +115,26 @@ fn test_milestone8_stats_dedup_ratio_calculation() {
 }
 
 #[test]
+fn test_stats_separate_live_and_reclaimable_storage() {
+    let dir = tempdir().unwrap();
+    let engine = StorageEngine::open(dir.path()).unwrap();
+    let active = dir.path().join("active.bin");
+    let orphan = dir.path().join("orphan.bin");
+    std::fs::write(&active, vec![b'A'; 32 * 1024]).unwrap();
+    std::fs::write(&orphan, vec![b'B'; 32 * 1024]).unwrap();
+
+    engine.put_file_named("active.bin", &active).unwrap();
+    engine.put_file_named("orphan.bin", &orphan).unwrap();
+    engine.unbind_file("orphan.bin").unwrap();
+
+    let stats = engine.stats();
+    assert_eq!(stats.total_objects, 1);
+    assert!(stats.total_chunks > stats.live_chunks);
+    assert!(stats.unique_chunks_bytes > stats.live_unique_chunks_bytes);
+    assert!(stats.reclaimable_stored_bytes > 0);
+}
+
+#[test]
 fn test_milestone8_get_specific_version() {
     let dir = tempdir().expect("tempdir failed");
     let store_dir = dir.path().join("store");

@@ -16,6 +16,7 @@ pub struct MetadataStore {
     tree_objects: Tree,
     tree_manifests: Tree,
     tree_snapshots: Tree,
+    tree_watcher_files: Tree,
 }
 
 impl MetadataStore {
@@ -27,6 +28,7 @@ impl MetadataStore {
         let tree_objects = db.open_tree("object_index")?;
         let tree_manifests = db.open_tree("manifests")?;
         let tree_snapshots = db.open_tree("snapshots")?;
+        let tree_watcher_files = db.open_tree("watcher_files")?;
 
         info!("MetadataStore opened at: {}", db_path.display());
 
@@ -36,6 +38,7 @@ impl MetadataStore {
             tree_objects,
             tree_manifests,
             tree_snapshots,
+            tree_watcher_files,
         })
     }
 
@@ -223,6 +226,60 @@ impl MetadataStore {
 
     pub fn count_manifests(&self) -> usize {
         self.tree_manifests.len()
+    }
+
+    fn watcher_file_key(watch_root: &str, name: &str) -> Vec<u8> {
+        let mut key = Vec::with_capacity(watch_root.len() + name.len() + 1);
+        key.extend_from_slice(watch_root.as_bytes());
+        key.push(0);
+        key.extend_from_slice(name.as_bytes());
+        key
+    }
+
+    fn watcher_file_prefix(watch_root: &str) -> Vec<u8> {
+        let mut prefix = Vec::with_capacity(watch_root.len() + 1);
+        prefix.extend_from_slice(watch_root.as_bytes());
+        prefix.push(0);
+        prefix
+    }
+
+    pub fn mark_watcher_file(&self, watch_root: &str, name: &str) -> Result<()> {
+        self.tree_watcher_files
+            .insert(Self::watcher_file_key(watch_root, name), &[])?;
+        Ok(())
+    }
+
+    pub fn unmark_watcher_file(&self, watch_root: &str, name: &str) -> Result<()> {
+        self.tree_watcher_files
+            .remove(Self::watcher_file_key(watch_root, name))?;
+        Ok(())
+    }
+
+    pub fn rename_watcher_file(&self, watch_root: &str, old_name: &str, new_name: &str) -> Result<()> {
+        use sled::transaction::TransactionResult;
+        let old_key = Self::watcher_file_key(watch_root, old_name);
+        let new_key = Self::watcher_file_key(watch_root, new_name);
+        let result: TransactionResult<(), OosLiteError> = self.tree_watcher_files.transaction(|tree| {
+            tree.remove(old_key.as_slice())?;
+            tree.insert(new_key.as_slice(), &[])?;
+            Ok(())
+        });
+
+        match result {
+            Ok(()) => Ok(()),
+            Err(sled::transaction::TransactionError::Abort(e)) => Err(e),
+            Err(sled::transaction::TransactionError::Storage(e)) => Err(OosLiteError::Database(e)),
+        }
+    }
+
+    pub fn list_watcher_files(&self, watch_root: &str) -> Result<Vec<String>> {
+        let prefix = Self::watcher_file_prefix(watch_root);
+        let mut names = Vec::new();
+        for item in self.tree_watcher_files.scan_prefix(&prefix) {
+            let (key, _) = item?;
+            names.push(String::from_utf8_lossy(&key[prefix.len()..]).to_string());
+        }
+        Ok(names)
     }
 
     pub fn flush(&self) -> Result<()> {

@@ -90,7 +90,7 @@
         <div>
           <div class="flex items-center gap-2">
             <h1 class="font-bold text-base text-white tracking-tight">OOS-Lite</h1>
-            <span class="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-400 font-mono font-medium border border-indigo-500/30">Engine v0.1.0</span>
+            <span id="engine-version" class="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-400 font-mono font-medium border border-indigo-500/30">Engine</span>
           </div>
           <p class="text-[11px] text-slate-400" data-i18n="app_subtitle">Content-Addressed & Deduplicated Storage Engine</p>
         </div>
@@ -202,13 +202,14 @@
         <!-- METRIC 2 -->
         <div class="card card-hover rounded-2xl p-5 relative overflow-hidden transition-all">
           <div class="flex items-center justify-between text-slate-400 text-xs font-semibold uppercase tracking-wider">
-            <span data-i18n="metric_physical">Physical Disk Size</span>
+            <span data-i18n="metric_physical">Vault Size on Disk</span>
             <div class="w-7 h-7 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-400">💾</div>
           </div>
           <div class="mt-3 flex items-baseline gap-2">
             <span id="stat-physical-disk" class="text-3xl font-extrabold text-white font-mono">0 B</span>
           </div>
-          <p id="stat-logical-size" class="text-[11px] text-slate-400 mt-2">Nominal uncompressed: 0 B</p>
+          <p id="stat-logical-size" class="text-[11px] text-slate-400 mt-2">Active latest data: 0 B</p>
+          <p id="stat-storage-breakdown" class="text-[11px] text-slate-500 mt-1">Live stored: 0 B · Reclaimable: 0 B</p>
         </div>
 
         <!-- METRIC 3 -->
@@ -635,7 +636,7 @@
                 <span id="watcher-status-text" class="text-xs font-mono font-bold px-2 py-0.5 rounded-full bg-slate-800 text-slate-400">Idle</span>
               </h2>
               <p class="text-xs text-slate-400 mt-1" data-i18n="watcher_subtitle">
-                Continuous background sync with TOCTOU-safe locking, automated reconciliation, and GFS retention.
+                Background versioning with verified reads, event recovery, and scheduled reconciliation.
               </p>
             </div>
           </div>
@@ -650,10 +651,14 @@
             <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5" data-i18n="watcher_card_title">
               Watched Folder Configuration
             </label>
-            <input type="text" id="watcher-dir-input" placeholder="C:\Users\...\Documents" data-i18n-placeholder="watcher_dir_placeholder" class="w-full px-3.5 py-2 rounded-xl bg-slate-950/70 border border-slate-700/80 text-white placeholder-slate-500 text-xs focus:outline-none focus:border-indigo-500 font-mono" />
+            <div class="flex gap-2">
+              <input type="text" id="watcher-dir-input" readonly placeholder="Select a folder to monitor" data-i18n-placeholder="watcher_dir_placeholder" class="w-full px-3.5 py-2 rounded-xl bg-slate-950/70 border border-slate-700/80 text-white placeholder-slate-500 text-xs focus:outline-none focus:border-indigo-500 font-mono cursor-default" />
+              <button type="button" id="watcher-pick-dir-btn" onclick="selectWatcherDirectory()" title="Select folder" class="w-10 h-9 shrink-0 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-indigo-300 flex items-center justify-center cursor-pointer">📁</button>
+            </div>
             <div class="text-[11px] text-slate-400">
               <span data-i18n="currently_watching">Active target:</span> <span id="watcher-current-dir" class="font-mono text-indigo-300">(Not configured)</span>
             </div>
+            <div class="text-[10px] text-slate-500" data-i18n="watcher_stop_note">Stopping only pauses monitoring. Stored files and version history remain in the vault.</div>
           </div>
 
           <div class="lg:col-span-2 space-y-1.5">
@@ -686,6 +691,16 @@
             </div>
           </div>
         </div>
+
+        <div class="mt-4 pt-4 border-t border-slate-800/70 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3" id="watcher-live-status">
+          <div><div class="text-[10px] text-slate-500 uppercase" data-i18n="watcher_metric_phase">Phase</div><div id="watcher-phase" class="text-xs font-mono text-slate-200 mt-1">Stopped</div></div>
+          <div><div class="text-[10px] text-slate-500 uppercase" data-i18n="watcher_metric_scanned">Scanned</div><div id="watcher-scanned" class="text-xs font-mono text-slate-200 mt-1">0</div></div>
+          <div><div class="text-[10px] text-slate-500 uppercase" data-i18n="watcher_metric_saved">Saved</div><div id="watcher-ingested" class="text-xs font-mono text-emerald-400 mt-1">0</div></div>
+          <div><div class="text-[10px] text-slate-500 uppercase" data-i18n="watcher_metric_removed">Removed</div><div id="watcher-removed" class="text-xs font-mono text-amber-400 mt-1">0</div></div>
+          <div><div class="text-[10px] text-slate-500 uppercase" data-i18n="watcher_metric_pending">Pending</div><div id="watcher-pending" class="text-xs font-mono text-sky-400 mt-1">0</div></div>
+          <div><div class="text-[10px] text-slate-500 uppercase" data-i18n="watcher_metric_last_sync">Last sync</div><div id="watcher-last-sync" class="text-xs font-mono text-slate-200 mt-1">Never</div></div>
+        </div>
+        <div id="watcher-last-error" class="hidden mt-3 px-3 py-2 border border-rose-500/30 bg-rose-500/10 text-rose-300 text-[11px]"></div>
       </div>
 
       <!-- 4 ARCHITECTURAL PILLARS -->
@@ -695,7 +710,7 @@
             <h3 class="text-sm font-bold text-white" data-i18n="four_pillars_title">4 Core Architectural & Durability Guarantees</h3>
             <p class="text-xs text-slate-400 mt-0.5">Engineered specifically for transparent, resilient Windows desktop synchronization</p>
           </div>
-          <span class="px-2.5 py-1 rounded-full bg-indigo-500/10 text-indigo-400 text-[11px] font-mono border border-indigo-500/20">Production-Grade</span>
+          <span class="px-2.5 py-1 rounded-full bg-indigo-500/10 text-indigo-400 text-[11px] font-mono border border-indigo-500/20">Resilient Watcher</span>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -706,7 +721,7 @@
               <span data-i18n="pillar_toctou_title">TOCTOU-Safe Atomic Read</span>
             </div>
             <p class="text-[11px] text-slate-400 mt-1.5 leading-relaxed" data-i18n="pillar_toctou_desc">
-              Holds active Windows handle with GENERIC_READ | FILE_SHARE_READ continuously during FastCDC stream chunking, preventing torn reads while apps write.
+              Verifies source size and modification state before and after hashing and FastCDC chunking, then retries unstable reads.
             </p>
           </div>
 
@@ -717,7 +732,7 @@
               <span data-i18n="pillar_recon_title">3-Tier Reconciliation Engine</span>
             </div>
             <p class="text-[11px] text-slate-400 mt-1.5 leading-relaxed" data-i18n="pillar_recon_desc">
-              Zero-loss guarantee: Cold startup scan, auto-recovery on Windows event buffer overflow, and periodic 15-second idle reconcile.
+              Registers filesystem events before the cold scan, recovers after event-buffer errors, and performs a full hourly reconciliation.
             </p>
           </div>
 
@@ -728,7 +743,7 @@
               <span data-i18n="pillar_throttle_title">Cold-Start I/O Throttling</span>
             </div>
             <p class="text-[11px] text-slate-400 mt-1.5 leading-relaxed" data-i18n="pillar_throttle_desc">
-              Runs with background I/O priority and micro-delays between chunks (10ms) to ensure desktop responsiveness even when processing 50,000+ files.
+              Adds a configurable cooperative delay between files during full scans to reduce sustained disk pressure.
             </p>
           </div>
 
@@ -739,7 +754,7 @@
               <span data-i18n="pillar_rename_title">Rename & Move Continuity</span>
             </div>
             <p class="text-[11px] text-slate-400 mt-1.5 leading-relaxed" data-i18n="pillar_rename_desc">
-              Detects file moves and renames on NTFS, maintaining object history continuity without re-hashing or storing duplicate chunk payloads.
+              Preserves object history for renames inside the watched tree and handles moves into or out of the watched scope.
             </p>
           </div>
         </div>
@@ -749,29 +764,10 @@
       <div class="card rounded-2xl p-6">
         <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-800/70">
           <div>
-            <h3 class="text-sm font-bold text-white" data-i18n="retention_title">Version Retention Policy (GFS Schedule) & Pruning</h3>
+            <h3 class="text-sm font-bold text-white" data-i18n="retention_title">Manual Version Retention & Pruning</h3>
             <p class="text-xs text-slate-400 mt-0.5" data-i18n="retention_desc">
-              Grandfather-Father-Son scheduling automatically balances granular history with physical disk efficiency.
+              Keep the latest N versions on demand, then run garbage collection to reclaim unreferenced chunks.
             </p>
-          </div>
-        </div>
-
-        <!-- GFS TIMELINE VISUAL -->
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 my-5">
-          <div class="p-3.5 rounded-xl bg-slate-900/70 border border-indigo-500/20 text-center">
-            <div class="text-[10px] font-mono text-indigo-400 uppercase font-bold tracking-wider" data-i18n="gfs_hourly_title">&lt; 24 Hours</div>
-            <div class="text-sm font-bold text-white mt-1">All Versions Retained</div>
-            <p class="text-[11px] text-slate-400 mt-1" data-i18n="gfs_hourly_desc">All granular file modifications are preserved for immediate editing rollback.</p>
-          </div>
-          <div class="p-3.5 rounded-xl bg-slate-900/70 border border-emerald-500/20 text-center">
-            <div class="text-[10px] font-mono text-emerald-400 uppercase font-bold tracking-wider" data-i18n="gfs_daily_title">1 - 30 Days</div>
-            <div class="text-sm font-bold text-white mt-1">1 Snapshot Per Day</div>
-            <p class="text-[11px] text-slate-400 mt-1" data-i18n="gfs_daily_desc">Consolidates into 1 daily snapshot version per day.</p>
-          </div>
-          <div class="p-3.5 rounded-xl bg-slate-900/70 border border-sky-500/20 text-center">
-            <div class="text-[10px] font-mono text-sky-400 uppercase font-bold tracking-wider" data-i18n="gfs_weekly_title">&gt; 30 Days</div>
-            <div class="text-sm font-bold text-white mt-1">1 Snapshot Per Week</div>
-            <p class="text-[11px] text-slate-400 mt-1" data-i18n="gfs_weekly_desc">Archived with 1 milestone version per week for long-term history.</p>
           </div>
         </div>
 
@@ -1130,7 +1126,7 @@
       "metric_dedup": "Tỷ Lệ Khử Trùng",
       "metric_saved": "tiết kiệm",
       "metric_fastcdc": "FastCDC phân vùng hướng nội dung",
-      "metric_physical": "Dung Lượng Đĩa Thật",
+      "metric_physical": "Dung Lượng Kho Trên Đĩa",
       "metric_nominal": "Dung lượng gốc chưa nén: ",
       "metric_files": "Số Lượng Tập Tin",
       "metric_objects": "tập tin logic",
@@ -1215,14 +1211,21 @@
       "restore_prompt_msg": "Nhập đường dẫn thư mục đích để khôi phục snapshot:",
       "tab_watcher": "Auto-Vault & Đồng Bộ",
       "watcher_title": "Auto-Vault & Động Cơ Đồng Bộ Nền",
-      "watcher_subtitle": "Tự động sao lưu và lập chỉ mục phiên bản liên tục với cơ chế khóa TOCTOU, đối soát 3 lớp và điều tiết I/O.",
+      "watcher_subtitle": "Lưu phiên bản nền với đọc dữ liệu được xác minh, phục hồi sự kiện và đối soát định kỳ.",
       "watcher_card_title": "Cấu Hình Thư Mục Giám Sát (Live Folder)",
-      "watcher_dir_placeholder": "Nhập đường dẫn thư mục tuyệt đối (vd: C:\\Users\\ADMIN\\Documents\\Work)",
+      "watcher_dir_placeholder": "Bấm nút thư mục để chọn đường dẫn",
       "currently_watching": "Thư mục đang theo dõi:",
+      "watcher_stop_note": "Dừng chỉ tạm ngưng giám sát; file và lịch sử phiên bản vẫn được giữ an toàn trong kho.",
       "btn_start_watcher": "▶ Kích Hoạt Auto-Vault",
       "btn_stop_watcher": "⏹ Tạm Dừng Auto-Vault",
       "watcher_status_idle": "Tạm Dừng",
       "watcher_status_running": "Đang Giám Sát",
+      "watcher_metric_phase": "Trạng thái",
+      "watcher_metric_scanned": "Đã quét",
+      "watcher_metric_saved": "Đã lưu",
+      "watcher_metric_removed": "Đã gỡ",
+      "watcher_metric_pending": "Đang chờ",
+      "watcher_metric_last_sync": "Đồng bộ cuối",
       "param_debounce": "Thời gian chờ gom file:",
       "param_cooldown": "Thời gian nghỉ chu kỳ:",
       "param_throttle": "Độ trễ điều tiết I/O:",
@@ -1230,15 +1233,15 @@
       "ms": "ms",
       "four_pillars_title": "4 Cơ Chế Bảo Vệ & Tính Toàn Vẹn Cốt Lõi",
       "pillar_toctou_title": "🔒 Khóa Đọc TOCTOU-Safe",
-      "pillar_toctou_desc": "Giữ handle Windows GENERIC_READ | FILE_SHARE_READ liên tục trong suốt quá trình FastCDC cắt chunk, ngăn chặn đọc file nửa chừng khi phần mềm khác đang ghi.",
+      "pillar_toctou_desc": "Xác minh kích thước và thời điểm sửa trước, sau khi băm và chia chunk FastCDC; tự thử lại nếu file đang thay đổi.",
       "pillar_recon_title": "🔄 Động Cơ Đối Soát 3 Lớp",
-      "pillar_recon_desc": "Bảo đảm không bỏ sót sự kiện: Quét toàn bộ khi khởi động (cold scan), tự phục hồi khi tràn buffer Windows và đối soát định kỳ khi nghỉ (idle).",
+      "pillar_recon_desc": "Đăng ký sự kiện trước lượt quét đầu, phục hồi khi lỗi bộ đệm sự kiện và đối soát toàn bộ mỗi giờ.",
       "pillar_throttle_title": "⚡ Điều Tiết Tải I/O Đĩa Thấp",
-      "pillar_throttle_desc": "Chạy ở chế độ background priority kết hợp nghỉ vi điều tiết (10ms) giữa các chunk, chống đơ nghẽn SSD khi xử lý hàng vạn tập tin ban đầu.",
+      "pillar_throttle_desc": "Thêm độ trễ điều tiết cấu hình được giữa các file trong lượt quét toàn bộ để giảm tải đĩa kéo dài.",
       "pillar_rename_title": "🏷️ Nhận Diện Đổi Tên & Di Chuyển",
-      "pillar_rename_desc": "Theo dõi thao tác rename/move trên NTFS, duy trì liền mạch lịch sử phiên bản của object mà không tốn công băm lại chunk trùng.",
-      "retention_title": "Chính Sách Lưu Trữ Phiên Bản (GFS Retention) & Dọn Dẹp",
-      "retention_desc": "Chính sách Grandfather-Father-Son tự động tối ưu hóa phiên bản lưu trữ mà không lo đầy đĩa.",
+      "pillar_rename_desc": "Giữ lịch sử object khi đổi tên trong thư mục theo dõi và xử lý file được chuyển vào hoặc ra khỏi phạm vi.",
+      "retention_title": "Lưu Giữ Phiên Bản & Dọn Dẹp Thủ Công",
+      "retention_desc": "Giữ N phiên bản mới nhất khi yêu cầu, sau đó chạy GC để thu hồi các chunk không còn tham chiếu.",
       "gfs_hourly_title": "< 24 Giờ",
       "gfs_hourly_desc": "Lưu giữ toàn bộ các lần sửa đổi để rollback tức thời khi làm việc.",
       "gfs_daily_title": "1 - 30 Ngày",
@@ -1333,7 +1336,7 @@
       "metric_dedup": "Dedup Ratio",
       "metric_saved": "saved",
       "metric_fastcdc": "FastCDC Content-Defined Boundaries",
-      "metric_physical": "Physical Disk Size",
+      "metric_physical": "Vault Size on Disk",
       "metric_nominal": "Nominal uncompressed: ",
       "metric_files": "Tracked Files",
       "metric_objects": "file objects",
@@ -1417,14 +1420,21 @@
       "restore_prompt_title": "Restore Snapshot",
       "restore_prompt_msg": "Enter destination directory path to extract snapshot files to:",
       "watcher_title": "Auto-Vault & Synchronization Engine",
-      "watcher_subtitle": "Continuous background sync with TOCTOU-safe locking, automated reconciliation, and GFS retention.",
+      "watcher_subtitle": "Background versioning with verified reads, event recovery, and scheduled reconciliation.",
       "watcher_card_title": "Watched Folder Configuration",
-      "watcher_dir_placeholder": "Enter absolute directory path (e.g. C:\\Users\\ADMIN\\Documents\\Work)",
+      "watcher_dir_placeholder": "Click the folder button to select a path",
       "currently_watching": "Active target:",
+      "watcher_stop_note": "Stopping only pauses monitoring; stored files and version history remain safely in the vault.",
       "btn_start_watcher": "▶ Start Auto-Vault",
       "btn_stop_watcher": "⏹ Stop Auto-Vault",
       "watcher_status_idle": "Idle",
       "watcher_status_running": "Watching",
+      "watcher_metric_phase": "Phase",
+      "watcher_metric_scanned": "Scanned",
+      "watcher_metric_saved": "Saved",
+      "watcher_metric_removed": "Removed",
+      "watcher_metric_pending": "Pending",
+      "watcher_metric_last_sync": "Last sync",
       "param_debounce": "Debounce:",
       "param_cooldown": "Cooldown:",
       "param_throttle": "I/O Throttle:",
@@ -1432,15 +1442,15 @@
       "ms": "ms",
       "four_pillars_title": "4 Core Architectural & Durability Guarantees",
       "pillar_toctou_title": "🔒 TOCTOU-Safe Atomic Read",
-      "pillar_toctou_desc": "Holds active Windows handle with GENERIC_READ | FILE_SHARE_READ continuously during FastCDC stream chunking, preventing torn reads while apps write.",
+      "pillar_toctou_desc": "Verifies source size and modification state before and after hashing and FastCDC chunking, then retries unstable reads.",
       "pillar_recon_title": "🔄 3-Tier Reconciliation Engine",
-      "pillar_recon_desc": "Zero-loss guarantee: Cold startup scan, auto-recovery on Windows event buffer overflow, and periodic 15-second idle reconcile.",
+      "pillar_recon_desc": "Registers filesystem events before the cold scan, recovers after event-buffer errors, and performs a full hourly reconciliation.",
       "pillar_throttle_title": "⚡ Cold-Start I/O Throttling",
-      "pillar_throttle_desc": "Runs with background I/O priority and micro-delays between chunks (10ms) to ensure desktop responsiveness even when processing 50,000+ files.",
+      "pillar_throttle_desc": "Adds a configurable cooperative delay between files during full scans to reduce sustained disk pressure.",
       "pillar_rename_title": "🏷️ Rename & Move Continuity",
-      "pillar_rename_desc": "Detects file moves and renames on NTFS, maintaining object history continuity without re-hashing or storing duplicate chunk payloads.",
-      "retention_title": "Version Retention Policy (GFS Schedule) & Pruning",
-      "retention_desc": "Grandfather-Father-Son scheduling automatically balances granular history with physical disk efficiency.",
+      "pillar_rename_desc": "Preserves object history for renames inside the watched tree and handles moves into or out of the watched scope.",
+      "retention_title": "Manual Version Retention & Pruning",
+      "retention_desc": "Keep the latest N versions on demand, then run garbage collection to reclaim unreferenced chunks.",
       "gfs_hourly_title": "< 24 Hours",
       "gfs_hourly_desc": "All granular file modifications are preserved for immediate editing rollback.",
       "gfs_daily_title": "1 - 30 Days",
@@ -1702,19 +1712,23 @@
         const res = await fetch('/api/stats');
         const data = await res.json();
 
-        document.getElementById('stat-dedup-ratio').innerText = (data.dedup_ratio || 1.0).toFixed(2) + 'x';
-        document.getElementById('stat-space-savings').innerText = (data.space_savings_pct || 0).toFixed(1) + '% saved';
+        document.getElementById('engine-version').innerText = `Engine v${data.engine_version || '?'}`;
+        document.getElementById('stat-dedup-ratio').innerText = (data.dedup_ratio ?? 1.0).toFixed(2) + 'x';
+        document.getElementById('stat-space-savings').innerText = (data.space_savings_pct ?? 0).toFixed(1) + '% saved';
         document.getElementById('stat-physical-disk').innerText = formatBytes(data.physical_disk_bytes);
-        document.getElementById('stat-logical-size').innerText = 'Nominal uncompressed: ' + formatBytes(data.logical_bytes);
+        document.getElementById('stat-logical-size').innerText = (currentLang === 'vi' ? 'Dữ liệu mới nhất: ' : 'Active latest data: ') + formatBytes(data.latest_logical_bytes);
+        document.getElementById('stat-storage-breakdown').innerText =
+          `${currentLang === 'vi' ? 'Chunk live đã nén' : 'Live stored chunks'}: ${formatBytes(data.live_stored_bytes)} · ` +
+          `${currentLang === 'vi' ? 'Có thể thu hồi' : 'Reclaimable estimate'}: ${formatBytes(data.reclaimable_stored_bytes)}`;
         document.getElementById('stat-objects').innerText = data.total_objects;
-        document.getElementById('stat-chunks').innerText = 'Unique immutable chunks: ' + data.total_chunks;
+        document.getElementById('stat-chunks').innerText = `${currentLang === 'vi' ? 'Chunk live' : 'Live chunks'}: ${data.live_chunks} / ${data.total_chunks}`;
         document.getElementById('stat-snapshots').innerText = data.total_snapshots;
         document.getElementById('stat-manifests').innerText = 'Manifests indexed: ' + data.total_manifests;
 
         document.getElementById('badge-files-count').innerText = data.total_objects;
         document.getElementById('badge-snapshots-count').innerText = data.total_snapshots;
 
-        updateChart(data.unique_chunks_bytes, Math.max(0, data.logical_bytes - data.unique_chunks_bytes));
+        updateChart(data.live_unique_chunks_bytes, Math.max(0, data.logical_bytes - data.live_unique_chunks_bytes));
       } catch (err) {
         console.error('Error loading stats:', err);
       }
@@ -3194,7 +3208,8 @@
       try {
         const debounce = parseInt(document.getElementById('watcher-debounce').value, 10) || 3;
         const cooldown = parseInt(document.getElementById('watcher-cooldown').value, 10) || 60;
-        const throttle = parseInt(document.getElementById('watcher-throttle').value, 10) || 10;
+        const parsedThrottle = parseInt(document.getElementById('watcher-throttle').value, 10);
+        const throttle = Number.isFinite(parsedThrottle) ? parsedThrottle : 10;
         const res = await fetch('/api/watcher/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -3785,11 +3800,16 @@
       const statusText = document.getElementById('watcher-status-text');
       const dirInput = document.getElementById('watcher-dir-input');
       const currentDirElem = document.getElementById('watcher-current-dir');
+      const phaseLabels = currentLang === 'vi'
+        ? { starting: 'Đang khởi động', scanning: 'Đang quét', watching: 'Đang giám sát', stopping: 'Đang dừng', stopped: 'Đã dừng' }
+        : { starting: 'Starting', scanning: 'Scanning', watching: 'Watching', stopping: 'Stopping', stopped: 'Stopped' };
+      const phase = data.phase || (data.running ? 'watching' : 'stopped');
+      const phaseLabel = phaseLabels[phase] || phase;
 
       if (badge) {
         if (data.running) {
           badge.className = 'px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[10px] font-mono';
-          badge.innerText = t('watcher_status_running');
+          badge.innerText = phaseLabel;
         } else {
           badge.className = 'px-1.5 py-0.2 rounded-full bg-slate-800 text-[10px] text-slate-400 font-mono';
           badge.innerText = t('watcher_status_idle');
@@ -3797,13 +3817,14 @@
       }
 
       if (statusText) {
-        statusText.innerText = data.running ? t('watcher_status_running') : t('watcher_status_idle');
+        statusText.innerText = phaseLabel;
         statusText.className = data.running 
           ? 'text-xs font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' 
           : 'text-xs font-mono font-bold px-2 py-0.5 rounded-full bg-slate-800 text-slate-400';
       }
 
       if (toggleBtn) {
+        toggleBtn.disabled = false;
         if (data.running) {
           toggleBtn.className = 'px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs shadow-lg shadow-rose-600/20 transition-all cursor-pointer';
           toggleBtn.innerText = t('btn_stop_watcher');
@@ -3819,9 +3840,73 @@
       if (dirInput && data.watched_dir && !dirInput.value) {
         dirInput.value = data.watched_dir;
       }
+
+      ['watcher-dir-input', 'watcher-debounce', 'watcher-cooldown', 'watcher-throttle'].forEach(id => {
+        const input = document.getElementById(id);
+        if (input) input.disabled = Boolean(data.running);
+      });
+      const pickDirButton = document.getElementById('watcher-pick-dir-btn');
+      if (pickDirButton) pickDirButton.disabled = Boolean(data.running);
+      if (!data.running) {
+        const debounceInput = document.getElementById('watcher-debounce');
+        const cooldownInput = document.getElementById('watcher-cooldown');
+        const throttleInput = document.getElementById('watcher-throttle');
+        if (debounceInput && Number.isFinite(data.debounce_secs)) debounceInput.value = data.debounce_secs;
+        if (cooldownInput && Number.isFinite(data.cooldown_secs)) cooldownInput.value = data.cooldown_secs;
+        if (throttleInput && Number.isFinite(data.throttle_ms)) throttleInput.value = data.throttle_ms;
+      }
+
+      const setMetric = (id, value) => {
+        const element = document.getElementById(id);
+        if (element) element.innerText = String(value ?? 0);
+      };
+      const phaseElement = document.getElementById('watcher-phase');
+      if (phaseElement) phaseElement.innerText = phaseLabel;
+      setMetric('watcher-scanned', data.scanned_files);
+      setMetric('watcher-ingested', data.ingested_files);
+      setMetric('watcher-removed', data.removed_files);
+      setMetric('watcher-pending', data.pending_files);
+
+      const lastSync = document.getElementById('watcher-last-sync');
+      if (lastSync) {
+        lastSync.innerText = data.last_sync_unix
+          ? new Date(data.last_sync_unix * 1000).toLocaleTimeString()
+          : (currentLang === 'vi' ? 'Chưa có' : 'Never');
+      }
+      const lastError = document.getElementById('watcher-last-error');
+      if (lastError) {
+        lastError.classList.toggle('hidden', !data.last_error);
+        lastError.innerText = data.last_error
+          ? `${currentLang === 'vi' ? 'Lỗi gần nhất' : 'Last error'} (${data.error_count || 1}): ${data.last_error}`
+          : '';
+      }
+    }
+
+    async function selectWatcherDirectory() {
+      const button = document.getElementById('watcher-pick-dir-btn');
+      if (button) button.disabled = true;
+      try {
+        const response = await fetch('/api/dialog/select-folder', { method: 'POST' });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Could not open folder picker');
+        if (data.path) {
+          document.getElementById('watcher-dir-input').value = data.path;
+          showToast(
+            currentLang === 'vi' ? 'Đã chọn thư mục' : 'Folder selected',
+            data.path,
+            'info'
+          );
+        }
+      } catch (error) {
+        showToast(currentLang === 'vi' ? 'Lỗi chọn thư mục' : 'Folder picker error', error.message, 'error');
+      } finally {
+        if (button) button.disabled = Boolean(cachedWatcherStatus && cachedWatcherStatus.running);
+      }
     }
 
     async function toggleWatcher() {
+      const toggleBtn = document.getElementById('watcher-toggle-btn');
+      if (toggleBtn) toggleBtn.disabled = true;
       const isRunning = cachedWatcherStatus && cachedWatcherStatus.running;
       if (isRunning) {
         try {
@@ -3829,19 +3914,28 @@
           const data = await res.json();
           cachedWatcherStatus = data;
           updateWatcherUi(data);
-          showToast(t('watcher_status_idle'), currentLang === 'vi' ? 'Đã tạm dừng Auto-Vault.' : 'Auto-Vault stopped.', 'info');
+          showToast(
+            t('watcher_status_idle'),
+            currentLang === 'vi'
+              ? 'Đã tạm dừng giám sát. File và lịch sử phiên bản vẫn được giữ trong kho.'
+              : 'Monitoring paused. Stored files and version history remain in the vault.',
+            'info'
+          );
         } catch (err) {
           showToast('Watcher Error', err.message, 'error');
+          if (toggleBtn) toggleBtn.disabled = false;
         }
       } else {
         const dir = document.getElementById('watcher-dir-input').value.trim();
         if (!dir) {
-          showToast(currentLang === 'vi' ? 'Thiếu đường dẫn' : 'Missing Directory', currentLang === 'vi' ? 'Vui lòng nhập đường dẫn thư mục cần giám sát.' : 'Please enter a folder path to watch.', 'warning');
+          showToast(currentLang === 'vi' ? 'Chưa chọn thư mục' : 'No Folder Selected', currentLang === 'vi' ? 'Vui lòng chọn thư mục cần giám sát.' : 'Please select a folder to watch.', 'warning');
+          if (toggleBtn) toggleBtn.disabled = false;
           return;
         }
         const debounce = parseInt(document.getElementById('watcher-debounce').value, 10) || 3;
         const cooldown = parseInt(document.getElementById('watcher-cooldown').value, 10) || 60;
-        const throttle = parseInt(document.getElementById('watcher-throttle').value, 10) || 10;
+        const parsedThrottle = parseInt(document.getElementById('watcher-throttle').value, 10);
+        const throttle = Number.isFinite(parsedThrottle) ? parsedThrottle : 10;
 
         try {
           const res = await fetch('/api/watcher/start', {
@@ -3857,6 +3951,7 @@
           const data = await res.json();
           if (!res.ok) {
             showToast('Start Error', data.error || 'Failed to start watcher', 'error');
+            if (toggleBtn) toggleBtn.disabled = false;
             return;
           }
           cachedWatcherStatus = data;
@@ -3864,6 +3959,7 @@
           showToast(t('watcher_status_running'), currentLang === 'vi' ? `Đang giám sát: ${dir}` : `Watching: ${dir}`, 'success');
         } catch (err) {
           showToast('Watcher Error', err.message, 'error');
+          if (toggleBtn) toggleBtn.disabled = false;
         }
       }
     }

@@ -26,10 +26,7 @@ pub enum OosLiteError {
     },
 
     #[error("Corrupted segment at offset {offset}: {reason}")]
-    CorruptedSegment {
-        offset: u64,
-        reason: String,
-    },
+    CorruptedSegment { offset: u64, reason: String },
 
     #[error("Object not found: {0}")]
     ObjectNotFound(String),
@@ -48,6 +45,12 @@ pub enum OosLiteError {
 
     #[error("Invalid logical file name '{name}': {reason}")]
     InvalidName { name: String, reason: String },
+
+    #[error("Source file changed while it was being read: {0}")]
+    SourceChanged(String),
+
+    #[error("Invalid watched folder: {0}")]
+    InvalidWatchScope(String),
 
     #[error("Authentication failed: {0}")]
     AuthenticationFailed(String),
