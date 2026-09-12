@@ -14,6 +14,7 @@ use oos_lite_core::watcher::{WatcherPhase, WatcherStatus};
 use oos_lite_core::StorageEngine;
 
 const INDEX_HTML: &str = include_str!("index.html");
+const APP_ICON: &[u8] = include_bytes!("../../app.ico");
 
 #[derive(Default)]
 pub struct MountController {
@@ -610,6 +611,15 @@ fn handle_request(
     }
 
     match (method, path.as_str()) {
+        (Method::Get, "/app-icon.ico") | (Method::Get, "/favicon.ico") => {
+            let content_type = Header::from_bytes("Content-Type", "image/x-icon").unwrap();
+            let cache_control = Header::from_bytes("Cache-Control", "no-cache").unwrap();
+            let _ = request.respond(
+                Response::from_data(APP_ICON.to_vec())
+                    .with_header(content_type)
+                    .with_header(cache_control),
+            );
+        }
         (Method::Get, "/desktop.css") | (Method::Get, "/desktop.js") => {
             let (body, content_type) = if path == "/desktop.css" {
                 (include_str!("desktop.css"), "text/css; charset=utf-8")
@@ -1742,5 +1752,12 @@ mod tests {
         assert!(!is_host_allowed("evil.com"));
         assert!(!is_host_allowed("evil.com:3000"));
         assert!(!is_host_allowed("localhost.attacker.com"));
+    }
+
+    #[test]
+    fn desktop_uses_the_embedded_windows_icon() {
+        assert!(INDEX_HTML.contains("href=\"/app-icon.ico\""));
+        assert!(APP_ICON.len() > 4);
+        assert_eq!(&APP_ICON[..4], &[0, 0, 1, 0]);
     }
 }
