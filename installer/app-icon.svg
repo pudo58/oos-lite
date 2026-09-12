@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" fill="none">
+  <defs>
+    <linearGradient id="oos_bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0bb5a0"/>
+      <stop offset="60%" stop-color="#087f70"/>
+      <stop offset="100%" stop-color="#044b41"/>
+    </linearGradient>
+    <linearGradient id="oos_rim" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.38"/>
+      <stop offset="40%" stop-color="#ffffff" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.04"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Base Squircle with Gradient -->
+  <rect x="8" y="8" width="496" height="496" rx="116" fill="url(#oos_bg)"/>
+
+  <!-- Inner Bevel Highlight Rim -->
+  <rect x="12" y="12" width="488" height="488" rx="112" stroke="url(#oos_rim)" stroke-width="8"/>
+
+  <!-- Layers-2 Symbol -->
+  <g transform="translate(96, 96) scale(13.333333)" stroke="#ffffff" stroke-width="2.15" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m16.02 12 5.48 3.13a1 1 0 0 1 0 1.74L13 21.74a2 2 0 0 1-2 0l-8.5-4.87a1 1 0 0 1 0-1.74L7.98 12" />
+    <path d="M13 13.74a2 2 0 0 1-2 0L2.5 8.87a1 1 0 0 1 0-1.74L11 2.26a2 2 0 0 1 2 0l8.5 4.87a1 1 0 0 1 0 1.74Z" />
+  </g>
+</svg>

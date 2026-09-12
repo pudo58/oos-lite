@@ -99,15 +99,15 @@ impl FsckRunner {
             }
         }
 
-        // 3. Scan Named Objects and their version records
-        let named_objects = metadata_store.list_named_objects()?;
-        for (name, obj_id, record) in named_objects {
+        // 3. Include unbound objects whose historical versions remain recoverable.
+        for record in metadata_store.all_objects() {
+            let record = record?;
             report.objects_checked += 1;
             for v in &record.versions {
                 if metadata_store.get_manifest(&v.manifest_id)?.is_none() {
                     report.errors.push(format!(
-                        "File '{}' (ObjectId {}) version #{} references missing manifest {}",
-                        name, obj_id, v.version, v.manifest_id
+                        "Object {} version #{} references missing manifest {}",
+                        record.object_id, v.version, v.manifest_id
                     ));
                 }
             }

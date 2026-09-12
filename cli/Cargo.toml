@@ -25,6 +25,8 @@ url = "2.5"
 ctrlc = "3.4"
 ureq = "3.4.1"
 rand = "0.10.2"
+rfd = "0.17.2"
+zip = { version = "2.2", default-features = false, features = ["deflate", "flate2"] }
 
 [target.'cfg(unix)'.dependencies]
 fuser = "0.14"

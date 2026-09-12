@@ -1,8 +1,9 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>OOS-Lite Desktop - Vault & Version Explorer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OOS-Lite · Local Vault</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%234f46e5'/><path d='M30 35 L70 35 L70 65 L30 65 Z' fill='none' stroke='white' stroke-width='8'/><circle cx='50' cy='50' r='8' fill='white'/></svg>">
   <!-- Tailwind CSS via CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -39,367 +40,84 @@
       }
     }
   </script>
-  <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
-    
-    body {
-      background-color: #070a13;
-      color: #f1f5f9;
-      font-family: 'Inter', sans-serif;
-    }
-
-    /* Custom scrollbar */
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
-    ::-webkit-scrollbar-track { background: #0b0f19; }
-    ::-webkit-scrollbar-thumb { background: #26334d; border-radius: 4px; }
-    ::-webkit-scrollbar-thumb:hover { background: #3b4d70; }
-
-    .glass-nav {
-      background: rgba(11, 15, 25, 0.85);
-      backdrop-filter: blur(16px);
-      border-bottom: 1px solid rgba(255, 255, 255, 0.07);
-    }
-    .card {
-      background: #0d1322;
-      border: 1px solid rgba(255, 255, 255, 0.06);
-      box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.5);
-    }
-    .card-hover:hover {
-      border-color: rgba(99, 102, 241, 0.35);
-      box-shadow: 0 8px 30px -4px rgba(99, 102, 241, 0.12);
-    }
-    .tab-btn.active {
-      background: rgba(99, 102, 241, 0.12);
-      color: #818cf8;
-      border-color: rgba(99, 102, 241, 0.3);
-    }
-  </style>
+  <link rel="stylesheet" href="/desktop.css">
+  <script src="https://cdn.jsdelivr.net/npm/lucide@0.468.0/dist/umd/lucide.min.js"></script>
 </head>
-<body class="min-h-screen flex flex-col antialiased selection:bg-indigo-500 selection:text-white">
+<body class="desktop-ui antialiased">
 
-  <!-- TOP HEADER -->
-  <header class="sticky top-0 z-40 glass-nav">
-    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-      <!-- LOGO & TITLE -->
-      <div class="flex items-center space-x-3.5">
-        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 via-purple-600 to-indigo-800 flex items-center justify-center font-black text-lg text-white shadow-lg shadow-indigo-500/25 border border-white/15">
-          <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path>
-          </svg>
-        </div>
-        <div>
-          <div class="flex items-center gap-2">
-            <h1 class="font-bold text-base text-white tracking-tight">OOS-Lite</h1>
-            <span class="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-400 font-mono font-medium border border-indigo-500/30">Engine v0.1.0</span>
-          </div>
-          <p class="text-[11px] text-slate-400" data-i18n="app_subtitle">Content-Addressed & Deduplicated Storage Engine</p>
-        </div>
-      </div>
 
-      <!-- VIRTUAL DRIVE MOUNT CONTROLLER -->
-      <div class="flex items-center space-x-2.5">
-        <button id="mount-toggle-btn" onclick="toggleMountFromUi()" class="flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold shadow-sm transition-all border border-indigo-500/50 bg-indigo-600 hover:bg-indigo-500 text-white active:scale-95 cursor-pointer" title="Bật/Tắt ổ đĩa ảo Z:">
-          <span id="mount-dot" class="w-2 h-2 rounded-full bg-slate-300"></span>
-          <span id="mount-status-text">Kết Nối Ổ Đĩa Z:\</span>
-        </button>
-
-        <button id="open-explorer-btn" onclick="openDriveExplorer()" class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-200 transition-all active:scale-95" title="Mở thư mục trong Windows Explorer">
-          <svg class="w-3.5 h-3.5 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path></svg>
-          <span id="open-explorer-text">Mở Ổ Z:\</span>
-        </button>
-
-        <button onclick="refreshAll(true)" id="refresh-btn" class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 text-slate-300 text-xs font-medium border border-slate-700/60 transition-all active:scale-95" title="Đồng bộ lại / Sync">
-          <svg id="refresh-icon" class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-          </svg>
-        </button>
-
-        <button onclick="toggleLanguage()" id="lang-toggle-btn" class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 text-slate-300 text-xs font-semibold border border-slate-700/60 transition-all active:scale-95 cursor-pointer" title="Chuyển đổi ngôn ngữ / Switch Language">
-          <span id="lang-flag">🇻🇳</span>
-          <span id="lang-label" class="font-mono text-[11px]">VI</span>
-        </button>
-      </div>
+  <aside class="app-sidebar" aria-label="Main navigation">
+    <div class="app-brand"><div class="brand-symbol"><i data-lucide="layers-2"></i></div><div><span class="brand-name">OOS-Lite</span><span class="brand-caption">PERSONAL VAULT</span></div></div>
+    <div class="vault-switcher"><i data-lucide="hard-drive"></i><div><strong data-i18n="local_vault">Local vault</strong><small data-i18n="on_device">On this device</small></div><span class="status-dot" style="margin-left:auto"></span></div>
+    <div class="nav-label" data-i18n="nav_workspace">Workspace</div>
+    <nav class="app-nav"><button id="tab-files" class="tab-btn" onclick="switchTab('files')"><i data-lucide="folder"></i><span data-i18n="tab_files"></span><span id="badge-files-count" class="nav-count">0</span></button>
+<button id="tab-overview" class="tab-btn" onclick="switchTab('overview')"><i data-lucide="chart-no-axes-combined"></i><span data-i18n="tab_overview"></span></button>
+<button id="tab-snapshots" class="tab-btn" onclick="switchTab('snapshots')"><i data-lucide="layers"></i><span data-i18n="tab_snapshots"></span><span id="badge-snapshots-count" class="nav-count">0</span></button>
+<button id="tab-upload" class="tab-btn" onclick="switchTab('upload')"><i data-lucide="cloud-upload"></i><span data-i18n="tab_upload"></span></button>
+<div class="nav-divider"></div><div class="nav-label" data-i18n="nav_tools">Tools</div><button id="tab-watcher" class="tab-btn" onclick="switchTab('watcher')"><i data-lucide="folder-sync"></i><span data-i18n="tab_watcher"></span><span id="badge-watcher-status" class="nav-count">Idle</span></button>
+<button id="tab-maintenance" class="tab-btn" onclick="switchTab('maintenance')"><i data-lucide="sliders-horizontal"></i><span data-i18n="tab_maintenance"></span></button></nav>
+    <div class="sidebar-bottom">
+      <div class="connection-label"><i data-lucide="hard-drive" style="width:14px;height:14px"></i><span data-i18n="local_storage">Local storage</span></div>
+      <div class="sidebar-storage"><strong id="sidebar-used">0 B</strong><span id="sidebar-dedup">1.00x</span></div>
+      <div class="sidebar-meter" title="Unique data relative to logical data"><span id="sidebar-meter-fill"></span></div>
+      <div class="sidebar-foot"><span id="engine-version">Engine</span><button class="icon-button" onclick="switchTab('overview')" data-i18n-title="view_overview"><i data-lucide="arrow-up-right"></i></button></div>
     </div>
-
-    <!-- MAIN NAVIGATION TABS -->
-    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 border-t border-slate-800/50 flex space-x-1 py-1.5 overflow-x-auto text-xs font-medium">
-      <button onclick="switchTab('overview')" id="tab-overview" class="tab-btn active px-3.5 py-1.5 rounded-lg border border-transparent text-slate-400 hover:text-slate-200 transition-all flex items-center gap-2">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
-        <span data-i18n="tab_overview">Overview</span>
-      </button>
-      <button onclick="switchTab('files')" id="tab-files" class="tab-btn px-3.5 py-1.5 rounded-lg border border-transparent text-slate-400 hover:text-slate-200 transition-all flex items-center gap-2">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path></svg>
-        <span data-i18n="tab_files">Files Explorer</span> <span id="badge-files-count" class="px-1.5 py-0.2 rounded-full bg-slate-800 text-[10px] text-slate-400 font-mono">0</span>
-      </button>
-      <button onclick="switchTab('snapshots')" id="tab-snapshots" class="tab-btn px-3.5 py-1.5 rounded-lg border border-transparent text-slate-400 hover:text-slate-200 transition-all flex items-center gap-2">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-        <span data-i18n="tab_snapshots">Snapshots</span> <span id="badge-snapshots-count" class="px-1.5 py-0.2 rounded-full bg-slate-800 text-[10px] text-slate-400 font-mono">0</span>
-      </button>
-      <button onclick="switchTab('upload')" id="tab-upload" class="tab-btn px-3.5 py-1.5 rounded-lg border border-transparent text-slate-400 hover:text-slate-200 transition-all flex items-center gap-2">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
-        <span data-i18n="tab_upload">Upload Center</span>
-      </button>
-      <button onclick="switchTab('watcher')" id="tab-watcher" class="tab-btn px-3.5 py-1.5 rounded-lg border border-transparent text-slate-400 hover:text-slate-200 transition-all flex items-center gap-2">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
-        <span data-i18n="tab_watcher">Auto-Vault</span> <span id="badge-watcher-status" class="px-1.5 py-0.2 rounded-full bg-slate-800 text-[10px] text-slate-400 font-mono">Idle</span>
-      </button>
-      <button onclick="switchTab('maintenance')" id="tab-maintenance" class="tab-btn px-3.5 py-1.5 rounded-lg border border-transparent text-slate-400 hover:text-slate-200 transition-all flex items-center gap-2">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
-        <span data-i18n="tab_maintenance">Maintenance & Health</span>
-      </button>
+  </aside>
+  <header class="app-topbar">
+    <div class="breadcrumbs"><button id="mobile-menu-btn" class="icon-button mobile-menu" title="Navigation" aria-label="Navigation" aria-expanded="false"><i data-lucide="menu"></i></button><span data-i18n="workspace">Workspace</span><i data-lucide="chevron-right" style="width:12px;height:12px"></i><strong id="breadcrumb-current">All files</strong></div>
+    <div class="topbar-actions">
+      <span class="connection-label"><span class="status-dot"></span><span data-i18n="local_only">Stored locally</span></span>
+      <button onclick="refreshAll(true)" id="refresh-btn" class="icon-button" data-i18n-title="refresh_label"><i id="refresh-icon" data-lucide="refresh-cw"></i></button>
+      <button onclick="openDriveExplorer()" id="open-explorer-btn" class="icon-button" title="Open drive" aria-label="Open drive"><i data-lucide="external-link"></i><span id="open-explorer-text" hidden></span></button>
+      <button onclick="toggleMountFromUi()" id="mount-toggle-btn" class="icon-button" title="Connect virtual drive" aria-label="Connect virtual drive"><i data-lucide="hard-drive"></i><span id="mount-dot" hidden></span><span id="mount-status-text" hidden></span></button>
+      <button onclick="toggleTheme()" id="theme-toggle-btn" class="icon-button" title="Dark mode" aria-label="Toggle theme"><i id="theme-icon" data-lucide="moon"></i></button>
+      <button onclick="toggleLanguage()" id="lang-toggle-btn" class="icon-button" title="English / Tiếng Việt" aria-label="Change language"><span id="lang-flag" hidden></span><span id="lang-label" style="font-size:10px;font-weight:600">EN</span></button>
     </div>
   </header>
+  <main class="app-main">
 
-  <!-- MAIN VIEWPORT -->
-  <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-
-    <!-- ========================================================================= -->
-    <!-- TAB 1: OVERVIEW -->
-    <!-- ========================================================================= -->
-    <div id="view-overview" class="space-y-6">
-
-      <!-- VIRTUAL DRIVE DESKTOP BANNER -->
-      <div id="drive-banner" class="card rounded-2xl p-5 bg-gradient-to-r from-slate-900/90 via-indigo-950/30 to-slate-900/90 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-lg">
-        <div class="flex items-center gap-4">
-          <div id="drive-icon-box" class="w-12 h-12 rounded-xl bg-slate-800 text-slate-400 flex items-center justify-center font-black text-xl border border-slate-700 transition-all">
-            Z:
-          </div>
-          <div>
-            <div class="flex items-center gap-2.5">
-              <h3 id="drive-banner-title" class="text-sm font-bold text-white">Ổ Đĩa Ảo OOS-Lite: Z:\ (Chưa kết nối)</h3>
-              <span id="drive-badge" class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-800 text-slate-400 border border-slate-700">Offline</span>
-            </div>
-            <p id="drive-banner-desc" class="text-xs text-slate-400 mt-1">Bấm nút "Kết Nối Ổ Đĩa" để mount ổ đĩa ảo vào Windows Explorer.</p>
-          </div>
-        </div>
-        <div class="flex items-center gap-2.5 self-end sm:self-center shrink-0">
-          <button id="banner-mount-btn" onclick="toggleMountFromUi()" class="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold shadow-md shadow-indigo-600/30 transition-all flex items-center gap-2 active:scale-95 cursor-pointer">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
-            <span id="banner-mount-text">⚡ Kết Nối Ổ Đĩa Z:\</span>
-          </button>
-          <button id="banner-open-btn" onclick="openDriveExplorer()" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium border border-slate-700 transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path></svg>
-            <span>Mở Explorer</span>
-          </button>
-        </div>
+    <div id="view-overview" class="hidden">
+      <div class="page-intro"><div><h2 data-i18n="tab_overview">Overview</h2><p data-i18n="overview_description"></p></div><button class="secondary-button" onclick="switchTab('snapshots')"><i data-lucide="layers"></i><span data-i18n="snapshot_create"></span></button></div>
+      <div class="files-metrics">
+        <div class="file-metric"><div data-i18n="metric_dedup">Dedup ratio</div><strong id="stat-dedup-ratio">1.00x</strong><small id="stat-space-savings">0% saved</small></div>
+        <div class="file-metric"><div data-i18n="storage_used">Storage used</div><strong id="stat-physical-disk">0 B</strong><small id="stat-logical-size"></small></div>
+        <div class="file-metric"><div data-i18n="tab_files">All files</div><strong id="stat-objects">0</strong><small id="stat-chunks"></small></div>
+        <div class="file-metric"><div data-i18n="tab_snapshots">Snapshots</div><strong id="stat-snapshots">0</strong><small id="stat-manifests"></small></div>
       </div>
-
-      <!-- 4 STAT METRICS -->
-      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <!-- METRIC 1 -->
-        <div class="card card-hover rounded-2xl p-5 relative overflow-hidden transition-all">
-          <div class="flex items-center justify-between text-slate-400 text-xs font-semibold uppercase tracking-wider">
-            <span data-i18n="metric_dedup">Dedup Ratio</span>
-            <div class="w-7 h-7 rounded-lg bg-indigo-500/10 flex items-center justify-center text-indigo-400">⚡</div>
-          </div>
-          <div class="mt-3 flex items-baseline gap-2">
-            <span id="stat-dedup-ratio" class="text-3xl font-extrabold text-indigo-400 font-mono">1.00x</span>
-            <span id="stat-space-savings" class="text-xs font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">0% saved</span>
-          </div>
-          <p class="text-[11px] text-slate-400 mt-2"><span data-i18n="metric_fastcdc">FastCDC Content-Defined Boundaries</span></p>
-        </div>
-
-        <!-- METRIC 2 -->
-        <div class="card card-hover rounded-2xl p-5 relative overflow-hidden transition-all">
-          <div class="flex items-center justify-between text-slate-400 text-xs font-semibold uppercase tracking-wider">
-            <span data-i18n="metric_physical">Physical Disk Size</span>
-            <div class="w-7 h-7 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-400">💾</div>
-          </div>
-          <div class="mt-3 flex items-baseline gap-2">
-            <span id="stat-physical-disk" class="text-3xl font-extrabold text-white font-mono">0 B</span>
-          </div>
-          <p id="stat-logical-size" class="text-[11px] text-slate-400 mt-2">Nominal uncompressed: 0 B</p>
-        </div>
-
-        <!-- METRIC 3 -->
-        <div class="card card-hover rounded-2xl p-5 relative overflow-hidden transition-all">
-          <div class="flex items-center justify-between text-slate-400 text-xs font-semibold uppercase tracking-wider">
-            <span data-i18n="metric_files">Tracked Files</span>
-            <div class="w-7 h-7 rounded-lg bg-sky-500/10 flex items-center justify-center text-sky-400">📁</div>
-          </div>
-          <div class="mt-3 flex items-baseline gap-2">
-            <span id="stat-objects" class="text-3xl font-extrabold text-white font-mono">0</span>
-            <span class="text-xs text-slate-400">file objects</span>
-          </div>
-          <p id="stat-chunks" class="text-[11px] text-slate-400 mt-2">Unique immutable chunks: 0</p>
-        </div>
-
-        <!-- METRIC 4 -->
-        <div class="card card-hover rounded-2xl p-5 relative overflow-hidden transition-all">
-          <div class="flex items-center justify-between text-slate-400 text-xs font-semibold uppercase tracking-wider">
-            <span data-i18n="metric_snapshots">Snapshots</span>
-            <div class="w-7 h-7 rounded-lg bg-purple-500/10 flex items-center justify-center text-purple-400">📸</div>
-          </div>
-          <div class="mt-3 flex items-baseline gap-2">
-            <span id="stat-snapshots" class="text-3xl font-extrabold text-purple-400 font-mono">0</span>
-            <span class="text-xs text-slate-400">reference roots</span>
-          </div>
-          <p id="stat-manifests" class="text-[11px] text-slate-400 mt-2">Manifests indexed: 0</p>
-        </div>
-      </div>
-
-      <!-- CHART & STORAGE EFFICIENCY -->
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <!-- CHART -->
-        <div class="card rounded-2xl p-6 lg:col-span-1 flex flex-col justify-between">
-          <div>
-            <h2 class="text-sm font-bold text-white tracking-wide flex items-center gap-2">
-              <span class="w-2 h-2 rounded-full bg-indigo-500"></span>
-              Storage Deduplication Efficiency
-            </h2>
-            <p class="text-xs text-slate-400 mt-1">Unique Chunk Storage vs Deduplication Savings</p>
-          </div>
-          <div class="my-6 h-52 relative flex items-center justify-center">
-            <canvas id="storageChart"></canvas>
-          </div>
-          <div class="border-t border-slate-800/80 pt-3 text-center text-xs text-slate-400 font-mono" id="chart-legend">
-            FastCDC 64KB target chunking
-          </div>
-        </div>
-
-        <!-- ARCHITECTURE & QUICK ACTIONS -->
-        <div class="card rounded-2xl p-6 lg:col-span-2 flex flex-col justify-between">
-          <div>
-            <h2 class="text-sm font-bold text-white tracking-wide flex items-center gap-2">
-              <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
-              <span data-i18n="specs_title">Storage Engine Specs & Properties</span>
-            </h2>
-            <p class="text-xs text-slate-400 mt-1"><span data-i18n="specs_desc">Robust durability and high performance guarantees</span></p>
-          </div>
-
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-4 my-4">
-            <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1">
-              <div class="text-xs font-semibold text-indigo-300 flex items-center gap-1.5">
-                <span data-i18n="spec_identity_title"><span>🔗</span> Content-Addressed Identity</span>
-              </div>
-              <p class="text-[11px] text-slate-400 leading-relaxed">
-                Chunks are identified by 256-bit BLAKE3 hashes and protected with CRC32C checksums against bit rot.
-              </p>
-            </div>
-
-            <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1">
-              <div class="text-xs font-semibold text-emerald-300 flex items-center gap-1.5">
-                <span data-i18n="spec_durability_title"><span>🛡️</span> Crash Durability (WAL)</span>
-              </div>
-              <p class="text-[11px] text-slate-400 leading-relaxed">
-                Append-only 256MB segment store backed by Write-Ahead Log (WAL) ensuring ACID redo recovery after abrupt termination.
-              </p>
-            </div>
-
-            <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1">
-              <div class="text-xs font-semibold text-purple-300 flex items-center gap-1.5">
-                <span data-i18n="spec_snapshot_title"><span>⚡</span> O(1) Zero-Copy Snapshots</span>
-              </div>
-              <p class="text-[11px] text-slate-400 leading-relaxed">
-                Snapshots only capture tree reference pointers without duplicating any physical data chunk payload.
-              </p>
-            </div>
-
-            <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1">
-              <div class="text-xs font-semibold text-sky-300 flex items-center gap-1.5">
-                <span data-i18n="spec_gc_title"><span>🧹</span> Mark-and-Sweep GC</span>
-              </div>
-              <p class="text-[11px] text-slate-400 leading-relaxed">
-                Reclaims unreferenced orphan chunks while safely preserving all shared chunks across versions and snapshots.
-              </p>
-            </div>
-          </div>
-
-          <div class="flex items-center justify-between border-t border-slate-800/80 pt-3">
-            <span class="text-xs text-slate-400"><span data-i18n="ready_store">Ready to store new data?</span></span>
-            <button onclick="switchTab('upload')" class="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition-all shadow-md shadow-indigo-600/30">
-              <span data-i18n="btn_open_upload">Open Upload Center →</span>
-            </button>
-          </div>
-        </div>
+      <div class="overview-grid">
+        <section><h3 data-i18n="storage_distribution">Storage distribution</h3><div class="chart-wrap"><canvas id="storageChart"></canvas></div><div id="chart-legend" class="hidden"></div></section>
+        <section><h3 data-i18n="vault_summary">Vault summary</h3><dl class="overview-facts"><div><dt>Chunking</dt><dd>FastCDC</dd></div><div><dt>Content hash</dt><dd>BLAKE3</dd></div><div><dt>Compression</dt><dd>Zstandard</dd></div><div><dt>Journal</dt><dd>Write-ahead log</dd></div></dl>
+          <div id="drive-banner" class="drive-strip"><div><span id="drive-icon-box" hidden></span><h3 id="drive-banner-title">Virtual drive</h3><span id="drive-badge">Offline</span><span id="drive-banner-desc" hidden></span></div><div class="flex gap-2"><button id="banner-mount-btn" class="secondary-button" onclick="toggleMountFromUi()"><i data-lucide="plug"></i><span id="banner-mount-text">Connect drive</span></button><button id="banner-open-btn" class="icon-button" onclick="openDriveExplorer()" title="Open drive"><i data-lucide="external-link"></i></button></div></div>
+        </section>
       </div>
     </div>
 
-    <!-- ========================================================================= -->
-    <!-- TAB 2: FILES EXPLORER -->
-    <!-- ========================================================================= -->
-    <div id="view-files" class="hidden space-y-4">
-      <div class="card rounded-2xl p-6">
-        <!-- CONTROLS HEADER -->
-        <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-800/80">
-          <div>
-            <h2 class="text-base font-bold text-white flex items-center gap-2">
-              <span data-i18n="files_title">Tracked Files</span>
-              <span id="files-counter" class="text-xs px-2 py-0.5 rounded-md bg-indigo-500/15 text-indigo-400 font-mono">0 files</span>
-            </h2>
-            <p class="text-xs text-slate-400 mt-0.5" data-i18n="files_subtitle">Manage and inspect versions of all logical files in store</p>
-          </div>
-
-          <!-- SEARCH & VIEW TOGGLE -->
-          <div class="flex items-center gap-3">
-            <div class="relative w-full sm:w-64">
-              <input type="text" id="file-search-input" oninput="filterFilesTable()" placeholder="Search by name or path..." data-i18n-placeholder="files_search_placeholder" class="w-full bg-slate-900/90 border border-slate-700/80 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 font-mono">
-              <svg class="w-4 h-4 text-slate-400 absolute left-2.5 top-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
-              </svg>
-            </div>
-
-            <div class="flex items-center rounded-lg bg-slate-900 border border-slate-800 p-0.5">
-              <button onclick="setViewMode('tree')" id="btn-view-tree" class="px-2.5 py-1 rounded-md text-xs bg-slate-800 text-indigo-400 font-medium flex items-center gap-1 cursor-pointer">
-                <span>🌲</span> <span data-i18n="view_tree">Tree</span>
-              </button>
-              <button onclick="setViewMode('list')" id="btn-view-list" class="px-2.5 py-1 rounded-md text-xs text-slate-400 font-medium flex items-center gap-1 hover:text-slate-200 cursor-pointer">
-                <span>📋</span> <span data-i18n="view_list">List</span>
-              </button>
-              <button onclick="setViewMode('grid')" id="btn-view-grid" class="px-2.5 py-1 rounded-md text-xs text-slate-400 font-medium flex items-center gap-1 hover:text-slate-200 cursor-pointer">
-                <span>🔲</span> <span data-i18n="view_grid">Grid</span>
-              </button>
-            </div>
-
-            <button onclick="switchTab('upload')" class="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition-all cursor-pointer">
-              <span data-i18n="btn_store_file">+ Store File</span>
-            </button>
-          </div>
+    <div id="view-files">
+      <div class="page-intro">
+        <div><h2 data-i18n="files_title">All files</h2><p data-i18n="files_description">Your files, with every version in place.</p></div>
+        <div class="page-intro-actions"><button class="secondary-button" onclick="switchTab('snapshots'); document.getElementById('snapshot-label-input').focus()"><i data-lucide="layers"></i><span data-i18n="snapshot_create">Create snapshot</span></button><button class="primary-button" onclick="switchTab('upload')"><i data-lucide="plus"></i><span data-i18n="import_files">Import files</span></button></div>
+      </div>
+      <div class="files-metrics">
+        <div class="file-metric"><div><i data-lucide="files"></i><span data-i18n="tab_files">All files</span></div><strong id="metric-files">0</strong></div>
+        <div class="file-metric"><div><i data-lucide="hard-drive"></i><span data-i18n="storage_used">Storage used</span></div><strong id="metric-storage">0 B</strong></div>
+        <div class="file-metric"><div><i data-lucide="leaf"></i><span data-i18n="saved_by_dedup">Space saved</span></div><strong id="metric-saved">0%</strong></div>
+        <div class="file-metric"><div><i data-lucide="layers"></i><span data-i18n="tab_snapshots">Snapshots</span></div><strong id="metric-versions">0</strong></div>
+      </div>
+      <div class="files-toolbar">
+        <div class="file-search"><i data-lucide="search"></i><input id="file-search-input" type="search" oninput="filterFilesTable()" placeholder="Search files and folders..." data-i18n-placeholder="files_search_placeholder" aria-label="Search files"></div>
+        <div class="toolbar-right"><select id="file-sort" onchange="filterFilesTable()" data-i18n-title="filter_label"><option value="name" data-i18n="sort_name">Name: A to Z</option><option value="recent" data-i18n="sort_recent">Recently updated</option><option value="size" data-i18n="sort_size">Largest files</option></select>
+          <div class="view-segments" role="group" aria-label="File view"><button id="btn-view-list" onclick="setViewMode('list')" title="List" aria-label="List"><i data-lucide="list"></i></button><button id="btn-view-tree" onclick="setViewMode('tree')" title="Tree" aria-label="Tree"><i data-lucide="folder-tree"></i></button><button id="btn-view-grid" onclick="setViewMode('grid')" title="Grid" aria-label="Grid"><i data-lucide="layout-grid"></i></button></div>
         </div>
-
-        <!-- TREE VIEW CONTAINER -->
-        <div id="files-tree-container" class="mt-4 space-y-2">
-          <div class="flex items-center justify-between px-3 py-2 bg-slate-900/60 rounded-xl border border-slate-800/80 text-xs">
-            <div class="flex items-center gap-2 text-slate-300 font-mono text-[11px]">
-              <span>📁 <span id="tree-root-label" data-i18n="tree_root">Store Root Directory</span></span>
-              <span id="tree-summary-stats" class="text-slate-400"></span>
-            </div>
-            <div class="flex items-center gap-2">
-              <button onclick="expandAllTreeFolders(true)" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-medium transition-colors border border-slate-700/60 cursor-pointer">
-                <span data-i18n="expand_all">➕ Mở tất cả</span>
-              </button>
-              <button onclick="expandAllTreeFolders(false)" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-medium transition-colors border border-slate-700/60 cursor-pointer">
-                <span data-i18n="collapse_all">➖ Thu gọn tất cả</span>
-              </button>
-            </div>
-          </div>
-          <div id="files-tree-body" class="space-y-1 font-mono text-xs">
-            <div class="py-12 text-center text-slate-400 font-mono" data-i18n="files_empty">Loading files...</div>
-          </div>
+      </div>
+      <div id="files-layout" class="files-layout">
+        <div class="files-results">
+          <div id="files-list-container"><table class="file-table"><thead><tr><th data-i18n="name_label">Name</th><th data-i18n="version_label">Version</th><th data-i18n="size_label">Size</th><th data-i18n="th_actions">Actions</th></tr></thead><tbody id="files-table-body"></tbody></table></div>
+          <div id="files-tree-container" class="hidden"><div class="flex justify-between items-center mb-4 text-xs"><div class="flex gap-2"><span id="tree-root-label" data-i18n="tree_root"></span><span id="tree-summary-stats"></span></div><div class="flex gap-1"><button class="icon-button" onclick="expandAllTreeFolders(true)" title="Expand all" aria-label="Expand all"><i data-lucide="unfold-vertical"></i></button><button class="icon-button" onclick="expandAllTreeFolders(false)" title="Collapse all" aria-label="Collapse all"><i data-lucide="fold-vertical"></i></button></div></div><div id="files-tree-body"></div></div>
+          <div id="files-grid-container" class="hidden grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3"></div>
+          <div class="files-footer"><span id="files-shown">0 files shown</span><span><i data-lucide="shield-check"></i><span data-i18n="local_only">Stored locally</span></span></div>
+          <span id="files-counter" hidden></span>
         </div>
-
-        <!-- LIST TABLE VIEW -->
-        <div id="files-list-container" class="hidden overflow-x-auto mt-4">
-          <table class="w-full text-left text-xs">
-            <thead class="text-[11px] text-slate-400 uppercase bg-slate-900/60 border-b border-slate-800/80">
-              <tr>
-                <th class="py-3 px-4" data-i18n="th_name">Name / Path</th>
-                <th class="py-3 px-4" data-i18n="th_version">Latest Version</th>
-                <th class="py-3 px-4" data-i18n="th_size">Size</th>
-                <th class="py-3 px-4" data-i18n="th_object_id">Persistent Object ID</th>
-                <th class="py-3 px-4 text-right" data-i18n="th_actions">Actions</th>
-              </tr>
-            </thead>
-            <tbody id="files-table-body" class="divide-y divide-slate-800/50">
-              <tr><td colspan="5" class="py-8 text-center text-slate-400 font-mono" data-i18n="files_empty">Loading files...</td></tr>
-            </tbody>
-          </table>
-        </div>
-
-        <!-- GRID VIEW -->
-        <div id="files-grid-container" class="hidden grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 mt-4">
-          <!-- Dynamically populated -->
-        </div>
+        <aside id="file-inspector" class="file-inspector" hidden aria-label="File details"></aside>
       </div>
     </div>
 
@@ -635,7 +353,7 @@
                 <span id="watcher-status-text" class="text-xs font-mono font-bold px-2 py-0.5 rounded-full bg-slate-800 text-slate-400">Idle</span>
               </h2>
               <p class="text-xs text-slate-400 mt-1" data-i18n="watcher_subtitle">
-                Continuous background sync with TOCTOU-safe locking, automated reconciliation, and GFS retention.
+                Continuous background sync with stable reads, reconciliation, and version history.
               </p>
             </div>
           </div>
@@ -650,7 +368,10 @@
             <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5" data-i18n="watcher_card_title">
               Watched Folder Configuration
             </label>
-            <input type="text" id="watcher-dir-input" placeholder="C:\Users\...\Documents" data-i18n-placeholder="watcher_dir_placeholder" class="w-full px-3.5 py-2 rounded-xl bg-slate-950/70 border border-slate-700/80 text-white placeholder-slate-500 text-xs focus:outline-none focus:border-indigo-500 font-mono" />
+            <div class="flex gap-2">
+              <input type="text" id="watcher-dir-input" placeholder="C:\Users\...\Documents" data-i18n-placeholder="watcher_dir_placeholder" class="min-w-0 flex-1 px-3.5 py-2 rounded-xl bg-slate-950/70 border border-slate-700/80 text-white placeholder-slate-500 text-xs focus:outline-none focus:border-indigo-500 font-mono" />
+              <button id="watcher-browse-btn" type="button" onclick="selectWatcherFolder()" class="px-3 py-2 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white cursor-pointer" data-i18n="btn_browse">Browse</button>
+            </div>
             <div class="text-[11px] text-slate-400">
               <span data-i18n="currently_watching">Active target:</span> <span id="watcher-current-dir" class="font-mono text-indigo-300">(Not configured)</span>
             </div>
@@ -686,6 +407,14 @@
             </div>
           </div>
         </div>
+        <div class="mt-4 grid grid-cols-2 sm:grid-cols-5 gap-3 text-[11px]">
+          <div><span class="text-slate-500" data-i18n="watcher_scanned">Scanned</span><div id="watcher-scanned" class="font-mono text-white mt-0.5">0</div></div>
+          <div><span class="text-slate-500" data-i18n="watcher_saved">Saved</span><div id="watcher-saved" class="font-mono text-emerald-400 mt-0.5">0</div></div>
+          <div><span class="text-slate-500" data-i18n="watcher_removed">Removed</span><div id="watcher-removed" class="font-mono text-amber-400 mt-0.5">0</div></div>
+          <div><span class="text-slate-500" data-i18n="watcher_pending">Pending</span><div id="watcher-pending" class="font-mono text-white mt-0.5">0</div></div>
+          <div><span class="text-slate-500" data-i18n="watcher_last_sync">Last sync</span><div id="watcher-last-sync" class="font-mono text-slate-300 mt-0.5">--</div></div>
+        </div>
+        <div id="watcher-last-error" class="hidden mt-3 px-3 py-2 rounded-lg border border-rose-500/30 bg-rose-500/10 text-[11px] text-rose-300"></div>
       </div>
 
       <!-- 4 ARCHITECTURAL PILLARS -->
@@ -695,7 +424,7 @@
             <h3 class="text-sm font-bold text-white" data-i18n="four_pillars_title">4 Core Architectural & Durability Guarantees</h3>
             <p class="text-xs text-slate-400 mt-0.5">Engineered specifically for transparent, resilient Windows desktop synchronization</p>
           </div>
-          <span class="px-2.5 py-1 rounded-full bg-indigo-500/10 text-indigo-400 text-[11px] font-mono border border-indigo-500/20">Production-Grade</span>
+          <span class="px-2.5 py-1 rounded-full bg-indigo-500/10 text-indigo-400 text-[11px] font-mono border border-indigo-500/20">Resilient Sync</span>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -703,10 +432,10 @@
           <div class="p-4 rounded-xl bg-slate-900/50 border border-slate-800/80 hover:border-slate-700/80 transition-colors">
             <div class="flex items-center gap-2 font-bold text-xs text-white">
               <span class="w-6 h-6 rounded-lg bg-indigo-500/20 text-indigo-400 flex items-center justify-center text-xs">🔒</span>
-              <span data-i18n="pillar_toctou_title">TOCTOU-Safe Atomic Read</span>
+              <span data-i18n="pillar_toctou_title">Stable File Reads</span>
             </div>
             <p class="text-[11px] text-slate-400 mt-1.5 leading-relaxed" data-i18n="pillar_toctou_desc">
-              Holds active Windows handle with GENERIC_READ | FILE_SHARE_READ continuously during FastCDC stream chunking, preventing torn reads while apps write.
+              Verifies file identity, size, and modification time around streaming reads, then retries files that changed during ingestion.
             </p>
           </div>
 
@@ -717,7 +446,7 @@
               <span data-i18n="pillar_recon_title">3-Tier Reconciliation Engine</span>
             </div>
             <p class="text-[11px] text-slate-400 mt-1.5 leading-relaxed" data-i18n="pillar_recon_desc">
-              Zero-loss guarantee: Cold startup scan, auto-recovery on Windows event buffer overflow, and periodic 15-second idle reconcile.
+              Registers filesystem events before a cancellable startup scan and periodically reconciles missed changes and deletions.
             </p>
           </div>
 
@@ -728,7 +457,7 @@
               <span data-i18n="pillar_throttle_title">Cold-Start I/O Throttling</span>
             </div>
             <p class="text-[11px] text-slate-400 mt-1.5 leading-relaxed" data-i18n="pillar_throttle_desc">
-              Runs with background I/O priority and micro-delays between chunks (10ms) to ensure desktop responsiveness even when processing 50,000+ files.
+              Applies a configurable delay between files during startup reconciliation to reduce foreground I/O pressure.
             </p>
           </div>
 
@@ -739,7 +468,7 @@
               <span data-i18n="pillar_rename_title">Rename & Move Continuity</span>
             </div>
             <p class="text-[11px] text-slate-400 mt-1.5 leading-relaxed" data-i18n="pillar_rename_desc">
-              Detects file moves and renames on NTFS, maintaining object history continuity without re-hashing or storing duplicate chunk payloads.
+              Handles paired and unpaired rename events across watched, ignored, and outside paths while preserving stored history.
             </p>
           </div>
         </div>
@@ -749,9 +478,9 @@
       <div class="card rounded-2xl p-6">
         <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-800/70">
           <div>
-            <h3 class="text-sm font-bold text-white" data-i18n="retention_title">Version Retention Policy (GFS Schedule) & Pruning</h3>
+            <h3 class="text-sm font-bold text-white" data-i18n="retention_title">Version Retention & Pruning</h3>
             <p class="text-xs text-slate-400 mt-0.5" data-i18n="retention_desc">
-              Grandfather-Father-Son scheduling automatically balances granular history with physical disk efficiency.
+              Versions remain available until you explicitly prune them; garbage collection reclaims unreferenced chunk data.
             </p>
           </div>
         </div>
@@ -759,19 +488,19 @@
         <!-- GFS TIMELINE VISUAL -->
         <div class="grid grid-cols-1 md:grid-cols-3 gap-3 my-5">
           <div class="p-3.5 rounded-xl bg-slate-900/70 border border-indigo-500/20 text-center">
-            <div class="text-[10px] font-mono text-indigo-400 uppercase font-bold tracking-wider" data-i18n="gfs_hourly_title">&lt; 24 Hours</div>
-            <div class="text-sm font-bold text-white mt-1">All Versions Retained</div>
-            <p class="text-[11px] text-slate-400 mt-1" data-i18n="gfs_hourly_desc">All granular file modifications are preserved for immediate editing rollback.</p>
+            <div class="text-[10px] font-mono text-indigo-400 uppercase font-bold tracking-wider" data-i18n="gfs_hourly_title">Version History</div>
+            <div class="text-sm font-bold text-white mt-1">Explicit Retention</div>
+            <p class="text-[11px] text-slate-400 mt-1" data-i18n="gfs_hourly_desc">New file versions remain stored until a prune operation removes them.</p>
           </div>
           <div class="p-3.5 rounded-xl bg-slate-900/70 border border-emerald-500/20 text-center">
-            <div class="text-[10px] font-mono text-emerald-400 uppercase font-bold tracking-wider" data-i18n="gfs_daily_title">1 - 30 Days</div>
-            <div class="text-sm font-bold text-white mt-1">1 Snapshot Per Day</div>
-            <p class="text-[11px] text-slate-400 mt-1" data-i18n="gfs_daily_desc">Consolidates into 1 daily snapshot version per day.</p>
+            <div class="text-[10px] font-mono text-emerald-400 uppercase font-bold tracking-wider" data-i18n="gfs_daily_title">Deduplication</div>
+            <div class="text-sm font-bold text-white mt-1">Shared Chunks</div>
+            <p class="text-[11px] text-slate-400 mt-1" data-i18n="gfs_daily_desc">Unchanged chunks are shared across versions instead of being stored twice.</p>
           </div>
           <div class="p-3.5 rounded-xl bg-slate-900/70 border border-sky-500/20 text-center">
-            <div class="text-[10px] font-mono text-sky-400 uppercase font-bold tracking-wider" data-i18n="gfs_weekly_title">&gt; 30 Days</div>
-            <div class="text-sm font-bold text-white mt-1">1 Snapshot Per Week</div>
-            <p class="text-[11px] text-slate-400 mt-1" data-i18n="gfs_weekly_desc">Archived with 1 milestone version per week for long-term history.</p>
+            <div class="text-[10px] font-mono text-sky-400 uppercase font-bold tracking-wider" data-i18n="gfs_weekly_title">Reclaim Space</div>
+            <div class="text-sm font-bold text-white mt-1">Prune Then GC</div>
+            <p class="text-[11px] text-slate-400 mt-1" data-i18n="gfs_weekly_desc">Prune old manifests first, then run garbage collection to reclaim disk space.</p>
           </div>
         </div>
 
@@ -896,13 +625,13 @@
           <div class="flex items-center gap-2 shrink-0">
             <!-- Mode Switcher -->
             <div class="inline-flex rounded-lg bg-slate-950 p-0.5 border border-slate-800 text-[11px]">
-              <button id="diff-mode-btn-diff" onclick="setDiffViewMode('diff')" class="px-2.5 py-1 rounded-md font-semibold text-white bg-indigo-600 transition-colors">
+              <button id="diff-mode-btn-diff" data-i18n="diff_mode_diff" onclick="setDiffViewMode('diff')" class="px-2.5 py-1 rounded-md font-semibold text-white bg-indigo-600 transition-colors">
                 🔀 So Sánh Diff
               </button>
-              <button id="diff-mode-btn-selected" onclick="setDiffViewMode('selected')" class="px-2.5 py-1 rounded-md font-semibold text-slate-400 hover:text-slate-200 transition-colors">
+              <button id="diff-mode-btn-selected" data-i18n="diff_mode_selected" onclick="setDiffViewMode('selected')" class="px-2.5 py-1 rounded-md font-semibold text-slate-400 hover:text-slate-200 transition-colors">
                 📄 Bản Đang Chọn
               </button>
-              <button id="diff-mode-btn-current" onclick="setDiffViewMode('current')" class="px-2.5 py-1 rounded-md font-semibold text-slate-400 hover:text-slate-200 transition-colors">
+              <button id="diff-mode-btn-current" data-i18n="diff_mode_current" onclick="setDiffViewMode('current')" class="px-2.5 py-1 rounded-md font-semibold text-slate-400 hover:text-slate-200 transition-colors">
                 📋 Bản Hiện Tại
               </button>
             </div>
@@ -1215,36 +944,45 @@
       "restore_prompt_msg": "Nhập đường dẫn thư mục đích để khôi phục snapshot:",
       "tab_watcher": "Auto-Vault & Đồng Bộ",
       "watcher_title": "Auto-Vault & Động Cơ Đồng Bộ Nền",
-      "watcher_subtitle": "Tự động sao lưu và lập chỉ mục phiên bản liên tục với cơ chế khóa TOCTOU, đối soát 3 lớp và điều tiết I/O.",
+      "watcher_subtitle": "Đồng bộ nền liên tục với thao tác đọc ổn định, đối soát và lịch sử phiên bản.",
       "watcher_card_title": "Cấu Hình Thư Mục Giám Sát (Live Folder)",
       "watcher_dir_placeholder": "Nhập đường dẫn thư mục tuyệt đối (vd: C:\\Users\\ADMIN\\Documents\\Work)",
       "currently_watching": "Thư mục đang theo dõi:",
       "btn_start_watcher": "▶ Kích Hoạt Auto-Vault",
       "btn_stop_watcher": "⏹ Tạm Dừng Auto-Vault",
+      "btn_browse": "Chọn thư mục",
       "watcher_status_idle": "Tạm Dừng",
       "watcher_status_running": "Đang Giám Sát",
+      "watcher_status_scanning": "Đang Quét",
+      "watcher_status_stopping": "Đang Dừng",
+      "watcher_status_degraded": "Có Lỗi",
+      "watcher_scanned": "Đã quét",
+      "watcher_saved": "Đã lưu",
+      "watcher_removed": "Đã xóa liên kết",
+      "watcher_pending": "Đang chờ",
+      "watcher_last_sync": "Đồng bộ cuối",
       "param_debounce": "Thời gian chờ gom file:",
       "param_cooldown": "Thời gian nghỉ chu kỳ:",
       "param_throttle": "Độ trễ điều tiết I/O:",
       "sec": "giây",
       "ms": "ms",
       "four_pillars_title": "4 Cơ Chế Bảo Vệ & Tính Toàn Vẹn Cốt Lõi",
-      "pillar_toctou_title": "🔒 Khóa Đọc TOCTOU-Safe",
-      "pillar_toctou_desc": "Giữ handle Windows GENERIC_READ | FILE_SHARE_READ liên tục trong suốt quá trình FastCDC cắt chunk, ngăn chặn đọc file nửa chừng khi phần mềm khác đang ghi.",
+      "pillar_toctou_title": "🔒 Đọc Tập Tin Ổn Định",
+      "pillar_toctou_desc": "Kiểm tra định danh, kích thước và thời gian sửa trước và sau khi đọc theo luồng; tự thử lại nếu tập tin thay đổi trong lúc lưu.",
       "pillar_recon_title": "🔄 Động Cơ Đối Soát 3 Lớp",
-      "pillar_recon_desc": "Bảo đảm không bỏ sót sự kiện: Quét toàn bộ khi khởi động (cold scan), tự phục hồi khi tràn buffer Windows và đối soát định kỳ khi nghỉ (idle).",
+      "pillar_recon_desc": "Đăng ký sự kiện trước khi quét khởi động có thể hủy, sau đó đối soát định kỳ các thay đổi hoặc thao tác xóa bị bỏ lỡ.",
       "pillar_throttle_title": "⚡ Điều Tiết Tải I/O Đĩa Thấp",
-      "pillar_throttle_desc": "Chạy ở chế độ background priority kết hợp nghỉ vi điều tiết (10ms) giữa các chunk, chống đơ nghẽn SSD khi xử lý hàng vạn tập tin ban đầu.",
+      "pillar_throttle_desc": "Áp dụng độ trễ tùy chỉnh giữa các tập tin trong quá trình đối soát ban đầu để giảm áp lực I/O tiền cảnh.",
       "pillar_rename_title": "🏷️ Nhận Diện Đổi Tên & Di Chuyển",
-      "pillar_rename_desc": "Theo dõi thao tác rename/move trên NTFS, duy trì liền mạch lịch sử phiên bản của object mà không tốn công băm lại chunk trùng.",
-      "retention_title": "Chính Sách Lưu Trữ Phiên Bản (GFS Retention) & Dọn Dẹp",
-      "retention_desc": "Chính sách Grandfather-Father-Son tự động tối ưu hóa phiên bản lưu trữ mà không lo đầy đĩa.",
-      "gfs_hourly_title": "< 24 Giờ",
-      "gfs_hourly_desc": "Lưu giữ toàn bộ các lần sửa đổi để rollback tức thời khi làm việc.",
-      "gfs_daily_title": "1 - 30 Ngày",
-      "gfs_daily_desc": "Tự động gộp giữ lại 1 phiên bản snapshot mỗi ngày.",
-      "gfs_weekly_title": "> 30 Ngày",
-      "gfs_weekly_desc": "Lưu trữ dài hạn 1 phiên bản mỗi tuần để làm mốc lịch sử.",
+      "pillar_rename_desc": "Xử lý sự kiện đổi tên cả khi đường dẫn đi vào hoặc ra khỏi vùng theo dõi, vùng bỏ qua và vẫn giữ lịch sử đã lưu.",
+      "retention_title": "Lưu Trữ Phiên Bản & Dọn Dẹp",
+      "retention_desc": "Phiên bản được giữ cho tới khi bạn chủ động dọn; Garbage Collection thu hồi dữ liệu chunk không còn tham chiếu.",
+      "gfs_hourly_title": "Lịch Sử Phiên Bản",
+      "gfs_hourly_desc": "Phiên bản mới được giữ cho tới khi thao tác dọn phiên bản xóa chúng.",
+      "gfs_daily_title": "Khử Trùng Lặp",
+      "gfs_daily_desc": "Các chunk không đổi được dùng chung giữa nhiều phiên bản thay vì lưu lặp lại.",
+      "gfs_weekly_title": "Thu Hồi Dung Lượng",
+      "gfs_weekly_desc": "Dọn manifest cũ trước, sau đó chạy Garbage Collection để thu hồi dung lượng đĩa.",
       "prune_card_title": "Công Cụ Dọn Dẹp Phiên Bản Cũ (Interactive Prune)",
       "prune_card_desc": "Thu gọn các bản sửa đổi cũ của tập tin, sau đó chạy Garbage Collection để thu hồi dung lượng đĩa thực tế.",
       "prune_keep_label": "Số phiên bản gần nhất cần giữ lại:",
@@ -1417,36 +1155,45 @@
       "restore_prompt_title": "Restore Snapshot",
       "restore_prompt_msg": "Enter destination directory path to extract snapshot files to:",
       "watcher_title": "Auto-Vault & Synchronization Engine",
-      "watcher_subtitle": "Continuous background sync with TOCTOU-safe locking, automated reconciliation, and GFS retention.",
+      "watcher_subtitle": "Continuous background sync with stable reads, reconciliation, and version history.",
       "watcher_card_title": "Watched Folder Configuration",
       "watcher_dir_placeholder": "Enter absolute directory path (e.g. C:\\Users\\ADMIN\\Documents\\Work)",
       "currently_watching": "Active target:",
       "btn_start_watcher": "▶ Start Auto-Vault",
       "btn_stop_watcher": "⏹ Stop Auto-Vault",
+      "btn_browse": "Browse",
       "watcher_status_idle": "Idle",
       "watcher_status_running": "Watching",
+      "watcher_status_scanning": "Scanning",
+      "watcher_status_stopping": "Stopping",
+      "watcher_status_degraded": "Degraded",
+      "watcher_scanned": "Scanned",
+      "watcher_saved": "Saved",
+      "watcher_removed": "Removed",
+      "watcher_pending": "Pending",
+      "watcher_last_sync": "Last sync",
       "param_debounce": "Debounce:",
       "param_cooldown": "Cooldown:",
       "param_throttle": "I/O Throttle:",
       "sec": "sec",
       "ms": "ms",
       "four_pillars_title": "4 Core Architectural & Durability Guarantees",
-      "pillar_toctou_title": "🔒 TOCTOU-Safe Atomic Read",
-      "pillar_toctou_desc": "Holds active Windows handle with GENERIC_READ | FILE_SHARE_READ continuously during FastCDC stream chunking, preventing torn reads while apps write.",
+      "pillar_toctou_title": "🔒 Stable File Reads",
+      "pillar_toctou_desc": "Verifies file identity, size, and modification time around streaming reads, then retries files that changed during ingestion.",
       "pillar_recon_title": "🔄 3-Tier Reconciliation Engine",
-      "pillar_recon_desc": "Zero-loss guarantee: Cold startup scan, auto-recovery on Windows event buffer overflow, and periodic 15-second idle reconcile.",
+      "pillar_recon_desc": "Registers filesystem events before a cancellable startup scan and periodically reconciles missed changes and deletions.",
       "pillar_throttle_title": "⚡ Cold-Start I/O Throttling",
-      "pillar_throttle_desc": "Runs with background I/O priority and micro-delays between chunks (10ms) to ensure desktop responsiveness even when processing 50,000+ files.",
+      "pillar_throttle_desc": "Applies a configurable delay between files during startup reconciliation to reduce foreground I/O pressure.",
       "pillar_rename_title": "🏷️ Rename & Move Continuity",
-      "pillar_rename_desc": "Detects file moves and renames on NTFS, maintaining object history continuity without re-hashing or storing duplicate chunk payloads.",
-      "retention_title": "Version Retention Policy (GFS Schedule) & Pruning",
-      "retention_desc": "Grandfather-Father-Son scheduling automatically balances granular history with physical disk efficiency.",
-      "gfs_hourly_title": "< 24 Hours",
-      "gfs_hourly_desc": "All granular file modifications are preserved for immediate editing rollback.",
-      "gfs_daily_title": "1 - 30 Days",
-      "gfs_daily_desc": "Consolidates into 1 daily snapshot version per day.",
-      "gfs_weekly_title": "> 30 Days",
-      "gfs_weekly_desc": "Archived with 1 milestone version per week for long-term history.",
+      "pillar_rename_desc": "Handles paired and unpaired rename events across watched, ignored, and outside paths while preserving stored history.",
+      "retention_title": "Version Retention & Pruning",
+      "retention_desc": "Versions remain available until you explicitly prune them; garbage collection reclaims unreferenced chunk data.",
+      "gfs_hourly_title": "Version History",
+      "gfs_hourly_desc": "New file versions remain stored until a prune operation removes them.",
+      "gfs_daily_title": "Deduplication",
+      "gfs_daily_desc": "Unchanged chunks are shared across versions instead of being stored twice.",
+      "gfs_weekly_title": "Reclaim Space",
+      "gfs_weekly_desc": "Prune old manifests first, then run garbage collection to reclaim disk space.",
       "prune_card_title": "Interactive Version Pruning Tool",
       "prune_card_desc": "Trim excess historical versions, then run Mark-and-Sweep Garbage Collection to reclaim physical storage.",
       "prune_keep_label": "Keep latest N versions:",
@@ -1484,11 +1231,11 @@
     }
   };
 
-    let currentLang = localStorage.getItem('oos_lang') || 'vi';
+    let currentLang = localStorage.getItem('oos_lang') || 'en';
     let storageChart = null;
     let cachedFilesList = [];
     let selectedFileQueue = [];
-    let currentViewMode = 'tree'; // Default to Tree View!
+    let currentViewMode = 'list';
     const expandedFolders = new Set();
     let confirmCallback = null;
 
@@ -1705,6 +1452,8 @@
         document.getElementById('stat-dedup-ratio').innerText = (data.dedup_ratio || 1.0).toFixed(2) + 'x';
         document.getElementById('stat-space-savings').innerText = (data.space_savings_pct || 0).toFixed(1) + '% saved';
         document.getElementById('stat-physical-disk').innerText = formatBytes(data.physical_disk_bytes);
+        const engineVersion = document.getElementById('engine-version');
+        if (engineVersion && data.engine_version) engineVersion.innerText = 'Engine v' + data.engine_version;
         document.getElementById('stat-logical-size').innerText = 'Nominal uncompressed: ' + formatBytes(data.logical_bytes);
         document.getElementById('stat-objects').innerText = data.total_objects;
         document.getElementById('stat-chunks').innerText = 'Unique immutable chunks: ' + data.total_chunks;
@@ -1714,6 +1463,7 @@
         document.getElementById('badge-files-count').innerText = data.total_objects;
         document.getElementById('badge-snapshots-count').innerText = data.total_snapshots;
 
+        updateDesktopStats(data);
         updateChart(data.unique_chunks_bytes, Math.max(0, data.logical_bytes - data.unique_chunks_bytes));
       } catch (err) {
         console.error('Error loading stats:', err);
@@ -1734,8 +1484,8 @@
           labels: ['Unique Stored Bytes', 'Eliminated Duplicates'],
           datasets: [{
             data: [uniqueBytes || 1, savedBytes || 0],
-            backgroundColor: ['#6366f1', '#10b981'],
-            borderColor: '#0d1322',
+            backgroundColor: ['#6f9c8a', '#dcebe3'],
+            borderColor: '#ffffff',
             borderWidth: 2,
             hoverOffset: 4
           }]
@@ -1746,7 +1496,7 @@
           plugins: {
             legend: {
               position: 'bottom',
-              labels: { color: '#94a3b8', boxWidth: 10, font: { size: 10 } }
+              labels: { color: '#78867e', boxWidth: 10, font: { size: 10 } }
             }
           },
           cutout: '72%'
@@ -1880,14 +1630,14 @@
         const v = file.latest_version || 1;
         if (v > 1) {
           // Multi-version: green badge with clock icon — signals history exists
-          return `<button onclick="openVersionsModal('${encodeURIComponent(file.name)}')"
+          return `<button onclick="openVersionsModal('${encodeURIComponent(file.name).replace(/'/g, '%27')}')"
             class="shrink-0 px-2 py-0.5 rounded-full bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-emerald-400 font-bold font-mono text-[10px] flex items-center gap-1"
             title="${t('view_versions_tip')}">
             🕐 v${v}
           </button>`;
         }
         // Single version: subtle indigo badge
-        return `<button onclick="openVersionsModal('${encodeURIComponent(file.name)}')"
+        return `<button onclick="openVersionsModal('${encodeURIComponent(file.name).replace(/'/g, '%27')}')"
           class="shrink-0 px-2 py-0.5 rounded-full bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/20 text-indigo-400 font-bold font-mono text-[10px]"
           title="${t('view_versions_tip')}">
           v${v}
@@ -1906,7 +1656,7 @@
 
           html += `
             <div class="tree-node my-1">
-              <div onclick="toggleTreeFolder(decodeURIComponent('${encodeURIComponent(sub.fullPath)}'))"
+              <div onclick="toggleTreeFolder(decodeURIComponent('${encodeURIComponent(sub.fullPath).replace(/'/g, '%27')}'))"
                    class="flex items-center justify-between px-3 py-2 rounded-xl bg-slate-900/60 hover:bg-slate-800/80 border border-slate-800/70 hover:border-indigo-500/30 cursor-pointer select-none transition-all group">
                 <div class="flex items-center gap-2 min-w-0">
                   <span class="text-[11px] text-indigo-400 font-mono transition-transform duration-200 ${isExpanded ? 'rotate-90 inline-block' : 'inline-block'}">▶</span>
@@ -1914,9 +1664,10 @@
                   <span class="font-semibold text-slate-100 group-hover:text-indigo-300 transition-colors truncate">${escapeHtml(sub.name)}</span>
                   <span class="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700 font-mono shrink-0">${childCount} ${t('items')}</span>
                 </div>
-                <div class="text-[11px] text-slate-400 font-mono shrink-0 ml-3 flex items-center space-x-3">
-                  <span>${formatBytes(sub.totalSize)}</span>
-                  <button onclick="event.stopPropagation(); confirmDeleteFolder('${encodeURIComponent(sub.fullPath)}')" class="px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 text-[10px] transition-colors uppercase font-bold" title="Delete Folder">Xóa</button>
+                <div class="text-[11px] text-slate-400 font-mono shrink-0 ml-3 flex items-center space-x-1 sm:space-x-2">
+                  <span class="mr-1">${formatBytes(sub.totalSize)}</span>
+                  <button onclick="event.stopPropagation(); createShareLink('${encodeURIComponent(sub.fullPath).replace(/'/g, '%27')}')" class="px-2 py-0.5 rounded bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/40 text-[10px] transition-colors cursor-pointer font-bold" title="Share Folder">Share</button>
+                  <button onclick="event.stopPropagation(); confirmDeleteFolder('${encodeURIComponent(sub.fullPath).replace(/'/g, '%27')}')" class="px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 text-[10px] transition-colors uppercase font-bold" title="Delete Folder">Xóa</button>
                 </div>
               </div>
               ${isExpanded ? `
@@ -1942,11 +1693,11 @@
               <div class="flex items-center justify-between sm:justify-end gap-3 shrink-0">
                 <span class="font-mono text-slate-400 text-[11px]">${formatBytes(file.size_bytes)}</span>
                 <div class="flex items-center gap-1">
-                  <button onclick="openPreviewModal('${encodeURIComponent(file.name)}', ${file.size_bytes})" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] transition-colors cursor-pointer">${t('action_preview')}</button>
-                  <button onclick="openVersionsModal('${encodeURIComponent(file.name)}')" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-indigo-300 text-[11px] transition-colors cursor-pointer">${t('action_versions')}</button>
-                  <a href="/api/download?target=${encodeURIComponent(file.name)}" class="px-2.5 py-1 rounded-lg bg-indigo-600/80 hover:bg-indigo-600 text-white text-[11px] transition-colors">${t('action_download')}</a>
-                  <button onclick="createShareLink('${encodeURIComponent(file.name)}')" class="px-2.5 py-1 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 text-[11px] transition-colors cursor-pointer">Share</button>
-                  <button onclick="confirmDeleteFile('${encodeURIComponent(file.name)}')" class="px-2 py-1 rounded-lg bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 text-[11px] transition-colors cursor-pointer">${t('action_delete')}</button>
+                  <button onclick="openPreviewModal('${encodeURIComponent(file.name).replace(/'/g, '%27')}', ${file.size_bytes})" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] transition-colors cursor-pointer">${t('action_preview')}</button>
+                  <button onclick="openVersionsModal('${encodeURIComponent(file.name).replace(/'/g, '%27')}')" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-indigo-300 text-[11px] transition-colors cursor-pointer">${t('action_versions')}</button>
+                  <a href="/api/download?target=${encodeURIComponent(file.name).replace(/'/g, '%27')}" class="px-2.5 py-1 rounded-lg bg-indigo-600/80 hover:bg-indigo-600 text-white text-[11px] transition-colors">${t('action_download')}</a>
+                  <button onclick="createShareLink('${encodeURIComponent(file.name).replace(/'/g, '%27')}')" class="px-2.5 py-1 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 text-[11px] transition-colors cursor-pointer">Share</button>
+                  <button onclick="confirmDeleteFile('${encodeURIComponent(file.name).replace(/'/g, '%27')}')" class="px-2 py-1 rounded-lg bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 text-[11px] transition-colors cursor-pointer">${t('action_delete')}</button>
                 </div>
               </div>
             </div>
@@ -2010,18 +1761,18 @@
               <span>${escapeHtml(f.name)}</span>
             </td>
             <td class="py-3 px-4 font-mono text-indigo-400 font-bold">
-              <button onclick="openVersionsModal('${encodeURIComponent(f.name)}')" class="px-2 py-0.5 rounded-full bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/20 transition-all cursor-pointer">
+              <button onclick="openVersionsModal('${encodeURIComponent(f.name).replace(/'/g, '%27')}')" class="px-2 py-0.5 rounded-full bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/20 transition-all cursor-pointer">
                 v${f.latest_version}
               </button>
             </td>
             <td class="py-3 px-4 font-mono text-slate-300">${formatBytes(f.size_bytes)}</td>
             <td class="py-3 px-4 font-mono text-slate-400 text-[11px]">${f.object_id.substring(0, 18)}...</td>
             <td class="py-3 px-4 text-right space-x-1.5 whitespace-nowrap">
-              <button onclick="openPreviewModal('${encodeURIComponent(f.name)}', ${f.size_bytes})" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors cursor-pointer">${t('action_preview')}</button>
-              <button onclick="openVersionsModal('${encodeURIComponent(f.name)}')" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-indigo-300 transition-colors cursor-pointer">${t('action_versions')}</button>
-              <a href="/api/download?target=${encodeURIComponent(f.name)}" class="px-2.5 py-1 rounded-lg bg-indigo-600/80 hover:bg-indigo-600 text-white transition-colors">${t('action_download')}</a>
-              <button onclick="createShareLink('${encodeURIComponent(f.name)}')" class="px-2.5 py-1 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 transition-colors cursor-pointer text-[11px]">Share</button>
-              <button onclick="confirmDeleteFile('${encodeURIComponent(f.name)}')" class="px-2 py-1 rounded-lg bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 text-[11px] transition-colors cursor-pointer">${t('action_delete')}</button>
+              <button onclick="openPreviewModal('${encodeURIComponent(f.name).replace(/'/g, '%27')}', ${f.size_bytes})" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors cursor-pointer">${t('action_preview')}</button>
+              <button onclick="openVersionsModal('${encodeURIComponent(f.name).replace(/'/g, '%27')}')" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-indigo-300 transition-colors cursor-pointer">${t('action_versions')}</button>
+              <a href="/api/download?target=${encodeURIComponent(f.name).replace(/'/g, '%27')}" class="px-2.5 py-1 rounded-lg bg-indigo-600/80 hover:bg-indigo-600 text-white transition-colors">${t('action_download')}</a>
+              <button onclick="createShareLink('${encodeURIComponent(f.name).replace(/'/g, '%27')}')" class="px-2.5 py-1 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 transition-colors cursor-pointer text-[11px]">Share</button>
+              <button onclick="confirmDeleteFile('${encodeURIComponent(f.name).replace(/'/g, '%27')}')" class="px-2 py-1 rounded-lg bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 text-[11px] transition-colors cursor-pointer">${t('action_delete')}</button>
             </td>
           </tr>
         `).join('');
@@ -2045,11 +1796,11 @@
               <div class="text-[11px] text-slate-400 font-mono mt-1">${formatBytes(f.size_bytes)}</div>
             </div>
             <div class="flex items-center justify-between border-t border-slate-800/80 pt-2 text-xs">
-              <button onclick="openPreviewModal('${encodeURIComponent(f.name)}', ${f.size_bytes})" class="text-indigo-400 hover:underline cursor-pointer">${t('action_preview')}</button>
+              <button onclick="openPreviewModal('${encodeURIComponent(f.name).replace(/'/g, '%27')}', ${f.size_bytes})" class="text-indigo-400 hover:underline cursor-pointer">${t('action_preview')}</button>
               <div class="space-x-1">
-                <button onclick="createShareLink('${encodeURIComponent(f.name)}')" class="px-2 py-0.5 rounded bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/40 text-[11px] cursor-pointer">Share</button>
-                <a href="/api/download?target=${encodeURIComponent(f.name)}" class="px-2 py-0.5 rounded bg-indigo-600/80 hover:bg-indigo-600 text-white text-[11px]">${t('action_download')}</a>
-                <button onclick="confirmDeleteFile('${encodeURIComponent(f.name)}')" class="px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 text-[11px] cursor-pointer">${t('action_delete')}</button>
+                <button onclick="createShareLink('${encodeURIComponent(f.name).replace(/'/g, '%27')}')" class="px-2 py-0.5 rounded bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/40 text-[11px] cursor-pointer">Share</button>
+                <a href="/api/download?target=${encodeURIComponent(f.name).replace(/'/g, '%27')}" class="px-2 py-0.5 rounded bg-indigo-600/80 hover:bg-indigo-600 text-white text-[11px]">${t('action_download')}</a>
+                <button onclick="confirmDeleteFile('${encodeURIComponent(f.name).replace(/'/g, '%27')}')" class="px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 text-[11px] cursor-pointer">${t('action_delete')}</button>
               </div>
             </div>
           </div>
@@ -2076,8 +1827,8 @@
             <td class="py-3 px-4 text-slate-300 font-mono">${s.entries_count} files captured</td>
             <td class="py-3 px-4 text-slate-400">${s.created_time}</td>
             <td class="py-3 px-4 text-right space-x-2">
-              <button onclick="restoreSnapshotPrompt('${encodeURIComponent(s.label)}')" class="px-3 py-1 rounded-lg bg-emerald-600/80 hover:bg-emerald-600 text-white text-xs font-medium transition-colors">Restore</button>
-              <button onclick="confirmDeleteSnapshot('${encodeURIComponent(s.label)}')" class="px-2.5 py-1 rounded-lg bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 text-xs transition-colors">Delete</button>
+              <button onclick="restoreSnapshotPrompt('${encodeURIComponent(s.label).replace(/'/g, '%27')}')" class="px-3 py-1 rounded-lg bg-emerald-600/80 hover:bg-emerald-600 text-white text-xs font-medium transition-colors">Restore</button>
+              <button onclick="confirmDeleteSnapshot('${encodeURIComponent(s.label).replace(/'/g, '%27')}')" class="px-2.5 py-1 rounded-lg bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 text-xs transition-colors">Delete</button>
             </td>
           </tr>
         `).join('');
@@ -2289,7 +2040,7 @@
       const ext = name.split('.').pop().toLowerCase();
       document.getElementById('preview-file-name').innerText = name;
       document.getElementById('preview-file-meta').innerText = `${formatBytes(sizeBytes)} • ${ext.toUpperCase()} File`;
-      document.getElementById('preview-file-icon').innerText = getFileIcon(name);
+      document.getElementById('preview-file-icon').innerHTML = getFileIcon(name);
       document.getElementById('preview-download-link').href = `/api/download?target=${encodeURIComponent(name)}`;
 
       const area = document.getElementById('preview-content-area');
@@ -2553,7 +2304,7 @@
             ? `<span class="ml-1.5 px-1.5 py-0.5 text-[9px] font-bold rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">${t('rollback_latest_badge')}</span>`
             : '';
           const timeStr = formatTimestamp(v.created_at);
-          const rawEnc = encodeURIComponent(name);
+          const rawEnc = encodeURIComponent(name).replace(/'/g, '%27');
 
           return `
             <tr id="version-row-${v.version}"
@@ -2919,7 +2670,7 @@
       container.innerHTML = `
         <div class="flex flex-col h-full">
           <div class="flex items-center justify-between px-3 py-1.5 bg-slate-950/80 border-b border-slate-800/80 text-[11px] text-slate-400 shrink-0">
-            <span>Toàn bộ nội dung: <strong class="text-indigo-300">${label}</strong> (${lines.length} dòng)</span>
+            <span>${currentLang === 'vi' ? 'Nội dung' : 'Content'}: <strong class="text-indigo-300">${label}</strong> (${lines.length} ${currentLang === 'vi' ? 'dòng' : 'lines'})</span>
           </div>
           <div class="flex-1 overflow-auto bg-[#070b14] text-xs font-mono select-text">
             <table class="w-full border-collapse">
@@ -3398,7 +3149,7 @@
             <div class="text-left space-y-4 mt-4">
                <div class="text-xs text-amber-400 bg-amber-900/30 border border-amber-500/30 p-2 rounded flex items-start gap-2">
                   <svg class="w-4 h-4 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
-                  <span><b>Lưu ý quan trọng:</b> Tuyệt đối KHÔNG tắt ứng dụng OOS-Lite này trong khi đang chia sẻ file, nếu không người nhận sẽ bị mất kết nối!</span>
+                  <span><b>Lưu ý quan trọng:</b> Tuyệt đối KHÔNG tắt ứng dụng OOS-Lite này trong khi đang chia sẻ dữ liệu, nếu không người nhận sẽ bị mất kết nối!</span>
                </div>
                
                <div><span class="text-slate-400 block text-xs mb-1">Mật khẩu tải file:</span>
@@ -3465,7 +3216,7 @@
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ name: prefix.endsWith('/') ? prefix : prefix + '/' })
             });
-            fetchFiles();
+            await refreshAll();
           } catch (err) {
             console.error(err);
           }
@@ -3785,22 +3536,31 @@
       const statusText = document.getElementById('watcher-status-text');
       const dirInput = document.getElementById('watcher-dir-input');
       const currentDirElem = document.getElementById('watcher-current-dir');
+      const browseBtn = document.getElementById('watcher-browse-btn');
+      const phaseKeys = {
+        scanning: 'watcher_status_scanning',
+        watching: 'watcher_status_running',
+        stopping: 'watcher_status_stopping',
+        stopped: 'watcher_status_idle',
+        degraded: 'watcher_status_degraded'
+      };
+      const phaseLabel = t(phaseKeys[data.phase] || (data.running ? 'watcher_status_running' : 'watcher_status_idle'));
+      const phaseClass = data.phase === 'degraded'
+        ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
+        : data.phase === 'scanning'
+          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+          : data.running
+            ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+            : 'bg-slate-800 text-slate-400';
 
       if (badge) {
-        if (data.running) {
-          badge.className = 'px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[10px] font-mono';
-          badge.innerText = t('watcher_status_running');
-        } else {
-          badge.className = 'px-1.5 py-0.2 rounded-full bg-slate-800 text-[10px] text-slate-400 font-mono';
-          badge.innerText = t('watcher_status_idle');
-        }
+        badge.className = `px-1.5 py-0.2 rounded-full text-[10px] font-mono ${phaseClass}`;
+        badge.innerText = phaseLabel;
       }
 
       if (statusText) {
-        statusText.innerText = data.running ? t('watcher_status_running') : t('watcher_status_idle');
-        statusText.className = data.running 
-          ? 'text-xs font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' 
-          : 'text-xs font-mono font-bold px-2 py-0.5 rounded-full bg-slate-800 text-slate-400';
+        statusText.innerText = phaseLabel;
+        statusText.className = `text-xs font-mono font-bold px-2 py-0.5 rounded-full ${phaseClass}`;
       }
 
       if (toggleBtn) {
@@ -3819,6 +3579,45 @@
       if (dirInput && data.watched_dir && !dirInput.value) {
         dirInput.value = data.watched_dir;
       }
+      const configurable = ['watcher-dir-input', 'watcher-debounce', 'watcher-cooldown', 'watcher-throttle'];
+      configurable.forEach(id => {
+        const element = document.getElementById(id);
+        if (element) element.disabled = !!data.running;
+      });
+      if (browseBtn) browseBtn.disabled = !!data.running;
+
+      if (!data.running) {
+        if (Number.isFinite(data.debounce_secs)) document.getElementById('watcher-debounce').value = data.debounce_secs;
+        if (Number.isFinite(data.cooldown_secs)) document.getElementById('watcher-cooldown').value = data.cooldown_secs;
+        if (Number.isFinite(data.throttle_ms)) document.getElementById('watcher-throttle').value = data.throttle_ms;
+      }
+      document.getElementById('watcher-scanned').innerText = data.scanned_files || 0;
+      document.getElementById('watcher-saved').innerText = data.saved_files || 0;
+      document.getElementById('watcher-removed').innerText = data.removed_files || 0;
+      document.getElementById('watcher-pending').innerText = data.pending_files || 0;
+      document.getElementById('watcher-last-sync').innerText = data.last_sync_at
+        ? new Date(data.last_sync_at * 1000).toLocaleString()
+        : '--';
+      const errorBox = document.getElementById('watcher-last-error');
+      if (errorBox) {
+        errorBox.innerText = data.last_error || '';
+        errorBox.classList.toggle('hidden', !data.last_error);
+      }
+    }
+
+    async function selectWatcherFolder() {
+      const button = document.getElementById('watcher-browse-btn');
+      if (button) button.disabled = true;
+      try {
+        const res = await fetch('/api/dialog/select-folder', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Folder selection failed');
+        if (data.path) document.getElementById('watcher-dir-input').value = data.path;
+      } catch (err) {
+        showToast('Folder Picker', err.message, 'error');
+      } finally {
+        if (button && !(cachedWatcherStatus && cachedWatcherStatus.running)) button.disabled = false;
+      }
     }
 
     async function toggleWatcher() {
@@ -3829,7 +3628,7 @@
           const data = await res.json();
           cachedWatcherStatus = data;
           updateWatcherUi(data);
-          showToast(t('watcher_status_idle'), currentLang === 'vi' ? 'Đã tạm dừng Auto-Vault.' : 'Auto-Vault stopped.', 'info');
+          showToast(t('watcher_status_idle'), currentLang === 'vi' ? 'Auto-Vault đã dừng. Tập tin và lịch sử đã lưu vẫn còn trong kho.' : 'Auto-Vault stopped. Stored files and version history remain in the vault.', 'info');
         } catch (err) {
           showToast('Watcher Error', err.message, 'error');
         }
@@ -3839,9 +3638,12 @@
           showToast(currentLang === 'vi' ? 'Thiếu đường dẫn' : 'Missing Directory', currentLang === 'vi' ? 'Vui lòng nhập đường dẫn thư mục cần giám sát.' : 'Please enter a folder path to watch.', 'warning');
           return;
         }
-        const debounce = parseInt(document.getElementById('watcher-debounce').value, 10) || 3;
-        const cooldown = parseInt(document.getElementById('watcher-cooldown').value, 10) || 60;
-        const throttle = parseInt(document.getElementById('watcher-throttle').value, 10) || 10;
+        const debounceValue = Number.parseInt(document.getElementById('watcher-debounce').value, 10);
+        const cooldownValue = Number.parseInt(document.getElementById('watcher-cooldown').value, 10);
+        const throttleValue = Number.parseInt(document.getElementById('watcher-throttle').value, 10);
+        const debounce = Number.isNaN(debounceValue) ? 3 : debounceValue;
+        const cooldown = Number.isNaN(cooldownValue) ? 60 : cooldownValue;
+        const throttle = Number.isNaN(throttleValue) ? 10 : throttleValue;
 
         try {
           const res = await fetch('/api/watcher/start', {
@@ -3904,15 +3706,6 @@
       }
     }
 
-    // Initial load & Polling
-    applyTranslations();
-    refreshAll().then(() => {
-      handleUrlAction();
-    });
-    setInterval(fetchMountStatus, 4000);
-    setInterval(fetchWatcherStatus, 4000);
-    setInterval(pollUiActions, 1000);
-
     async function pollUiActions() {
       try {
         const res = await fetch('/api/ui/actions');
@@ -3928,5 +3721,6 @@
       }
     }
   </script>
+  <script src="/desktop.js"></script>
 </body>
 </html>

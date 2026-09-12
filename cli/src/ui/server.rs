@@ -1,15 +1,16 @@
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
-use tracing::{info, error};
+use tracing::error;
 use url::Url;
-use std::sync::OnceLock;
 
 static UI_ACTIONS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
+use oos_lite_core::watcher::{WatcherPhase, WatcherStatus};
 use oos_lite_core::StorageEngine;
 
 const INDEX_HTML: &str = include_str!("index.html");
@@ -30,15 +31,23 @@ pub struct WatcherController {
     pub cooldown_secs: u64,
     pub throttle_ms: u64,
     pub handle: Option<oos_lite_core::watcher::WatcherHandle>,
+    pub last_status: Option<WatcherStatus>,
 }
 
 #[derive(Serialize)]
 struct ApiWatcherStatus {
     running: bool,
+    phase: String,
     watched_dir: Option<String>,
     debounce_secs: u64,
     cooldown_secs: u64,
     throttle_ms: u64,
+    scanned_files: u64,
+    saved_files: u64,
+    removed_files: u64,
+    pending_files: usize,
+    last_sync_at: Option<u64>,
+    last_error: Option<String>,
     message: Option<String>,
 }
 
@@ -76,6 +85,7 @@ struct ApiMountStatus {
 
 #[derive(Serialize)]
 struct ApiStats {
+    engine_version: &'static str,
     total_chunks: usize,
     total_manifests: usize,
     total_objects: usize,
@@ -86,6 +96,50 @@ struct ApiStats {
     physical_disk_bytes: u64,
     dedup_ratio: f64,
     space_savings_pct: f64,
+}
+
+fn watcher_phase_name(phase: WatcherPhase) -> &'static str {
+    match phase {
+        WatcherPhase::Scanning => "scanning",
+        WatcherPhase::Watching => "watching",
+        WatcherPhase::Stopping => "stopping",
+        WatcherPhase::Stopped => "stopped",
+        WatcherPhase::Degraded => "degraded",
+    }
+}
+
+fn watcher_status_response(
+    ctrl: &WatcherController,
+    status: WatcherStatus,
+    message: Option<String>,
+) -> ApiWatcherStatus {
+    ApiWatcherStatus {
+        running: ctrl.is_running,
+        phase: watcher_phase_name(status.phase).to_string(),
+        watched_dir: ctrl.watch_dir.as_ref().map(|p| p.display().to_string()),
+        debounce_secs: ctrl.debounce_secs,
+        cooldown_secs: ctrl.cooldown_secs,
+        throttle_ms: ctrl.throttle_ms,
+        scanned_files: status.scanned_files,
+        saved_files: status.saved_files,
+        removed_files: status.removed_files,
+        pending_files: status.pending_files,
+        last_sync_at: status.last_sync_at,
+        last_error: status.last_error,
+        message,
+    }
+}
+
+fn stopped_watcher_status() -> WatcherStatus {
+    WatcherStatus {
+        phase: WatcherPhase::Stopped,
+        scanned_files: 0,
+        saved_files: 0,
+        removed_files: 0,
+        pending_files: 0,
+        last_sync_at: None,
+        last_error: None,
+    }
 }
 
 #[derive(Serialize)]
@@ -193,7 +247,10 @@ fn json_response<T: Serialize>(data: &T) -> Response<std::io::Cursor<Vec<u8>>> {
 }
 
 fn error_response(status: u16, msg: &str) -> Response<std::io::Cursor<Vec<u8>>> {
-    let body = serde_json::to_vec(&ErrorResponse { error: msg.to_string() }).unwrap();
+    let body = serde_json::to_vec(&ErrorResponse {
+        error: msg.to_string(),
+    })
+    .unwrap();
     let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
     Response::from_data(body)
         .with_status_code(StatusCode(status))
@@ -237,7 +294,12 @@ pub fn open_desktop_window(url: &str) {
     for path in &candidate_browsers {
         if std::path::Path::new(path).exists() {
             if let Ok(_) = std::process::Command::new(path)
-                .args([&app_arg, size_arg, "--no-first-run", "--no-default-browser-check"])
+                .args([
+                    &app_arg,
+                    size_arg,
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ])
                 .spawn()
             {
                 return;
@@ -248,7 +310,12 @@ pub fn open_desktop_window(url: &str) {
     // 2. Try looking up in PATH
     for cmd in &["msedge.exe", "msedge", "chrome.exe", "chrome", "brave.exe"] {
         if let Ok(_) = std::process::Command::new(cmd)
-            .args([&app_arg, size_arg, "--no-first-run", "--no-default-browser-check"])
+            .args([
+                &app_arg,
+                size_arg,
+                "--no-first-run",
+                "--no-default-browser-check",
+            ])
             .spawn()
         {
             return;
@@ -272,7 +339,10 @@ pub fn open_desktop_window(url: &str) {
     }
 
     fn to_wide(s: &str) -> Vec<u16> {
-        OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+        OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
     }
 
     let op = to_wide("open");
@@ -315,8 +385,10 @@ pub fn start_ui_server(
 
     let vault_dir = engine.root_dir().to_path_buf();
     let manager = crate::share::ShareManager::new(&vault_dir);
-    crate::share::ShareManager::spawn_tunnel(3001, manager.public_url.clone(), vault_dir);
-    crate::share::ShareManager::start_public_server(engine.clone(), manager.clone(), 3001);
+    if std::env::var("OOS_DISABLE_PUBLIC_SHARING").as_deref() != Ok("1") {
+        crate::share::ShareManager::spawn_tunnel(3001, manager.public_url.clone(), vault_dir);
+        crate::share::ShareManager::start_public_server(engine.clone(), manager.clone(), 3001);
+    }
 
     let local_url = if host == "0.0.0.0" {
         println!("⚠️  SECURITY WARNING: Bound to 0.0.0.0 - Web UI is exposed to LAN without auth!");
@@ -337,7 +409,24 @@ pub fn start_ui_server(
     println!("============================================================");
 
     let mount_ctrl = Arc::new(Mutex::new(MountController::default()));
-    let watcher_ctrl = Arc::new(Mutex::new(WatcherController::default()));
+    let persisted_watcher = engine.metadata_store().load_watcher_config().ok().flatten();
+    let watcher_ctrl = Arc::new(Mutex::new(match persisted_watcher {
+        Some((dir, debounce_secs, cooldown_secs, throttle_ms)) => WatcherController {
+            watch_dir: Some(PathBuf::from(dir)),
+            debounce_secs,
+            cooldown_secs,
+            throttle_ms,
+            last_status: Some(stopped_watcher_status()),
+            ..WatcherController::default()
+        },
+        None => WatcherController {
+            debounce_secs: 3,
+            cooldown_secs: 60,
+            throttle_ms: 10,
+            last_status: Some(stopped_watcher_status()),
+            ..WatcherController::default()
+        },
+    }));
 
     // Clean up legacy .bat shortcuts on Windows Desktop if present
     #[cfg(windows)]
@@ -374,7 +463,9 @@ pub fn start_ui_server(
             128,
             8,
             r,
-        ).is_ok() {
+        )
+        .is_ok()
+        {
             #[cfg(windows)]
             let mut drive = None;
             #[cfg(windows)]
@@ -426,7 +517,13 @@ pub fn start_ui_server(
         let manager_clone = manager.clone();
 
         std::thread::spawn(move || {
-            if let Err(e) = handle_request(engine_clone, mount_ctrl_clone, watcher_ctrl_clone, manager_clone, request) {
+            if let Err(e) = handle_request(
+                engine_clone,
+                mount_ctrl_clone,
+                watcher_ctrl_clone,
+                manager_clone,
+                request,
+            ) {
                 tracing::error!("Request error: {:?}", e);
             }
         });
@@ -462,15 +559,27 @@ fn handle_request(
     let method = request.method().clone();
 
     // 1. DNS Rebinding & Host header validation
-    if let Some(host_header) = request.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("Host")) {
+    if let Some(host_header) = request
+        .headers()
+        .iter()
+        .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("Host"))
+    {
         if !is_host_allowed(host_header.value.as_str()) {
-            let _ = request.respond(error_response(403, "Invalid Host header (DNS Rebinding protection)"));
+            let _ = request.respond(error_response(
+                403,
+                "Invalid Host header (DNS Rebinding protection)",
+            ));
             return Ok(());
         }
     }
 
     // 2. Fetch Metadata (Sec-Fetch-Site): reject cross-site requests
-    if let Some(sec_site) = request.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("Sec-Fetch-Site")) {
+    if let Some(sec_site) = request.headers().iter().find(|h| {
+        h.field
+            .as_str()
+            .as_str()
+            .eq_ignore_ascii_case("Sec-Fetch-Site")
+    }) {
         let val = sec_site.value.as_str();
         if val.eq_ignore_ascii_case("cross-site") {
             let _ = request.respond(error_response(403, "Cross-Site Requests Forbidden"));
@@ -479,9 +588,16 @@ fn handle_request(
     }
 
     // 3. CSRF Protection: Strict Origin validation
-    if let Some(origin_header) = request.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("Origin")) {
+    if let Some(origin_header) = request
+        .headers()
+        .iter()
+        .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("Origin"))
+    {
         if !is_origin_allowed(origin_header.value.as_str()) {
-            let _ = request.respond(error_response(403, "Cross-Origin Requests (CORS/CSRF) Forbidden"));
+            let _ = request.respond(error_response(
+                403,
+                "Cross-Origin Requests (CORS/CSRF) Forbidden",
+            ));
             return Ok(());
         }
     }
@@ -494,8 +610,18 @@ fn handle_request(
     }
 
     match (method, path.as_str()) {
+        (Method::Get, "/desktop.css") | (Method::Get, "/desktop.js") => {
+            let (body, content_type) = if path == "/desktop.css" {
+                (include_str!("desktop.css"), "text/css; charset=utf-8")
+            } else {
+                (include_str!("desktop.js"), "text/javascript; charset=utf-8")
+            };
+            let ct = Header::from_bytes("Content-Type", content_type).unwrap();
+            let _ = request.respond(Response::from_string(body).with_header(ct));
+        }
         (Method::Get, "/") | (Method::Get, "/index.html") => {
-            let ct = Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap();
+            let ct =
+                Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap();
             let resp = Response::from_string(INDEX_HTML).with_header(ct);
             let _ = request.respond(resp);
         }
@@ -528,6 +654,7 @@ fn handle_request(
         (Method::Get, "/api/stats") => {
             let s = engine.stats();
             let resp_data = ApiStats {
+                engine_version: env!("CARGO_PKG_VERSION"),
                 total_chunks: s.total_chunks,
                 total_manifests: s.total_manifests,
                 total_objects: s.total_objects,
@@ -542,33 +669,31 @@ fn handle_request(
             let _ = request.respond(json_response(&resp_data));
         }
 
-        (Method::Get, "/api/files") => {
-            match engine.list_files() {
-                Ok(files) => {
-                    let items: Vec<ApiFileItem> = files
-                        .into_iter()
-                        .map(|(name, id, record)| {
-                            let (latest_ver, size, created) = if let Some(latest) = record.latest() {
-                                (latest.version, latest.size_bytes, latest.created_at)
-                            } else {
-                                (0, 0, 0)
-                            };
-                            ApiFileItem {
-                                name,
-                                object_id: id.to_string(),
-                                latest_version: latest_ver,
-                                size_bytes: size,
-                                created_at: created,
-                            }
-                        })
-                        .collect();
-                    let _ = request.respond(json_response(&items));
-                }
-                Err(e) => {
-                    let _ = request.respond(error_response(500, &e.to_string()));
-                }
+        (Method::Get, "/api/files") => match engine.list_files() {
+            Ok(files) => {
+                let items: Vec<ApiFileItem> = files
+                    .into_iter()
+                    .map(|(name, id, record)| {
+                        let (latest_ver, size, created) = if let Some(latest) = record.latest() {
+                            (latest.version, latest.size_bytes, latest.created_at)
+                        } else {
+                            (0, 0, 0)
+                        };
+                        ApiFileItem {
+                            name,
+                            object_id: id.to_string(),
+                            latest_version: latest_ver,
+                            size_bytes: size,
+                            created_at: created,
+                        }
+                    })
+                    .collect();
+                let _ = request.respond(json_response(&items));
             }
-        }
+            Err(e) => {
+                let _ = request.respond(error_response(500, &e.to_string()));
+            }
+        },
 
         (Method::Get, "/api/versions") => {
             let name_query = parsed_url.query_pairs().find(|(k, _)| k == "name");
@@ -595,24 +720,22 @@ fn handle_request(
             }
         }
 
-        (Method::Get, "/api/snapshots") => {
-            match engine.list_snapshots() {
-                Ok(snapshots) => {
-                    let items: Vec<ApiSnapshotItem> = snapshots
-                        .into_iter()
-                        .map(|s| ApiSnapshotItem {
-                            label: s.label,
-                            created_time: format_relative_time(s.created_at),
-                            entries_count: s.entries.len(),
-                        })
-                        .collect();
-                    let _ = request.respond(json_response(&items));
-                }
-                Err(e) => {
-                    let _ = request.respond(error_response(500, &e.to_string()));
-                }
+        (Method::Get, "/api/snapshots") => match engine.list_snapshots() {
+            Ok(snapshots) => {
+                let items: Vec<ApiSnapshotItem> = snapshots
+                    .into_iter()
+                    .map(|s| ApiSnapshotItem {
+                        label: s.label,
+                        created_time: format_relative_time(s.created_at),
+                        entries_count: s.entries.len(),
+                    })
+                    .collect();
+                let _ = request.respond(json_response(&items));
             }
-        }
+            Err(e) => {
+                let _ = request.respond(error_response(500, &e.to_string()));
+            }
+        },
 
         (Method::Post, "/api/upload") => {
             let name_query = parsed_url.query_pairs().find(|(k, _)| k == "name");
@@ -628,7 +751,11 @@ fn handle_request(
                 })
                 .collect::<Vec<_>>()
                 .join("/");
-            let file_name = if safe_name.is_empty() { "unnamed_file".to_string() } else { safe_name };
+            let file_name = if safe_name.is_empty() {
+                "unnamed_file".to_string()
+            } else {
+                safe_name
+            };
 
             let tmp_dir = std::env::temp_dir();
             let now_ns = SystemTime::now()
@@ -641,7 +768,10 @@ fn handle_request(
                 let mut tmp_file = match std::fs::File::create(&tmp_path) {
                     Ok(f) => f,
                     Err(e) => {
-                        let _ = request.respond(error_response(500, &format!("Failed to create temp file: {}", e)));
+                        let _ = request.respond(error_response(
+                            500,
+                            &format!("Failed to create temp file: {}", e),
+                        ));
                         return Ok(());
                     }
                 };
@@ -649,7 +779,10 @@ fn handle_request(
                 let reader = request.as_reader();
                 if let Err(e) = std::io::copy(reader, &mut tmp_file) {
                     let _ = std::fs::remove_file(&tmp_path);
-                    let _ = request.respond(error_response(500, &format!("Failed to stream body: {}", e)));
+                    let _ = request.respond(error_response(
+                        500,
+                        &format!("Failed to stream body: {}", e),
+                    ));
                     return Ok(());
                 }
             }
@@ -699,7 +832,8 @@ fn handle_request(
                 let _ = request.respond(error_response(400, "Selected path is a folder. Please choose individual files, or use Auto-Vault to sync folders."));
                 return Ok(());
             }
-            let fallback_name = target_path.file_name()
+            let fallback_name = target_path
+                .file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or("unnamed_file")
                 .to_string();
@@ -718,7 +852,8 @@ fn handle_request(
                     let _ = request.respond(json_response(&resp));
                 }
                 Err(e) => {
-                    let _ = request.respond(error_response(500, &format!("Failed to store file: {}", e)));
+                    let _ = request
+                        .respond(error_response(500, &format!("Failed to store file: {}", e)));
                 }
             }
         }
@@ -741,30 +876,47 @@ fn handle_request(
             };
             let folder_path = PathBuf::from(&req_data.path);
             if !folder_path.is_dir() {
-                let _ = request.respond(error_response(400, "Selected path is not a valid directory"));
+                let _ = request.respond(error_response(
+                    400,
+                    "Selected path is not a valid directory",
+                ));
                 return Ok(());
             }
 
-            let base_name = folder_path.file_name()
+            let base_name = folder_path
+                .file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or("folder")
                 .to_string();
 
-            fn walk_folder(dir: &Path, root: &Path, prefix: &str, out: &mut Vec<(PathBuf, String)>) {
+            fn walk_folder(
+                dir: &Path,
+                root: &Path,
+                prefix: &str,
+                out: &mut Vec<(PathBuf, String)>,
+            ) {
                 if let Ok(entries) = std::fs::read_dir(dir) {
                     for entry in entries.flatten() {
                         let p = entry.path();
                         let name = entry.file_name();
                         let name_str = name.to_string_lossy();
                         // Skip system and heavy build artifacts
-                        if name_str.starts_with('.') || name_str == "node_modules" || name_str == "target" || name_str == "dist" {
+                        if name_str.starts_with('.')
+                            || name_str == "node_modules"
+                            || name_str == "target"
+                            || name_str == "dist"
+                        {
                             continue;
                         }
                         if p.is_dir() {
                             walk_folder(&p, root, prefix, out);
                         } else if p.is_file() {
                             if let Ok(rel) = p.strip_prefix(root) {
-                                let logical = format!("{}/{}", prefix, rel.to_string_lossy().replace('\\', "/"));
+                                let logical = format!(
+                                    "{}/{}",
+                                    prefix,
+                                    rel.to_string_lossy().replace('\\', "/")
+                                );
                                 out.push((p, logical));
                             }
                         }
@@ -788,9 +940,9 @@ fn handle_request(
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let snap_label = req_data.snapshot_label.unwrap_or_else(|| {
-                format!("snapshot_{}_{}", base_name, now_secs)
-            });
+            let snap_label = req_data
+                .snapshot_label
+                .unwrap_or_else(|| format!("snapshot_{}_{}", base_name, now_secs));
 
             let mut snapshot_ok = false;
             if req_data.create_snapshot.unwrap_or(true) {
@@ -811,7 +963,10 @@ fn handle_request(
         }
 
         (Method::Get, "/api/download") => {
-            let target = parsed_url.query_pairs().find(|(k, _)| k == "target").map(|(_, v)| v.replace('\\', "/"));
+            let target = parsed_url
+                .query_pairs()
+                .find(|(k, _)| k == "target")
+                .map(|(_, v)| v.replace('\\', "/"));
             let version = parsed_url
                 .query_pairs()
                 .find(|(k, _)| k == "version")
@@ -823,29 +978,37 @@ fn handle_request(
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_nanos();
-                let tmp_path = tmp_dir.join(format!("oos_down_{}_{}.tmp", std::process::id(), now_ns));
+                let tmp_path =
+                    tmp_dir.join(format!("oos_down_{}_{}.tmp", std::process::id(), now_ns));
 
                 match engine.get_file_version(&target_str, version, &tmp_path) {
-                    Ok(_) => {
-                        match std::fs::File::open(&tmp_path) {
-                            Ok(file) => {
-                                let download_name = Path::new(&target_str)
-                                    .file_name()
-                                    .and_then(|s| s.to_str())
-                                    .unwrap_or("download.bin");
-                                let disp_val = format!("attachment; filename=\"{}\"", download_name);
-                                let disp = Header::from_bytes(&b"Content-Disposition"[..], disp_val.as_bytes()).unwrap();
-                                let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/octet-stream"[..]).unwrap();
-                                let resp = Response::from_file(file).with_header(disp).with_header(ct);
-                                let _ = request.respond(resp);
-                                let _ = std::fs::remove_file(&tmp_path);
-                            }
-                            Err(e) => {
-                                let _ = std::fs::remove_file(&tmp_path);
-                                let _ = request.respond(error_response(500, &format!("Open error: {}", e)));
-                            }
+                    Ok(_) => match std::fs::File::open(&tmp_path) {
+                        Ok(file) => {
+                            let download_name = Path::new(&target_str)
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("download.bin");
+                            let disp_val = format!("attachment; filename=\"{}\"", download_name);
+                            let disp = Header::from_bytes(
+                                &b"Content-Disposition"[..],
+                                disp_val.as_bytes(),
+                            )
+                            .unwrap();
+                            let ct = Header::from_bytes(
+                                &b"Content-Type"[..],
+                                &b"application/octet-stream"[..],
+                            )
+                            .unwrap();
+                            let resp = Response::from_file(file).with_header(disp).with_header(ct);
+                            let _ = request.respond(resp);
+                            let _ = std::fs::remove_file(&tmp_path);
                         }
-                    }
+                        Err(e) => {
+                            let _ = std::fs::remove_file(&tmp_path);
+                            let _ =
+                                request.respond(error_response(500, &format!("Open error: {}", e)));
+                        }
+                    },
                     Err(e) => {
                         let _ = std::fs::remove_file(&tmp_path);
                         let _ = request.respond(error_response(404, &e.to_string()));
@@ -886,12 +1049,26 @@ fn handle_request(
                 Ok(req) => {
                     let dir_str = req.dir.trim();
                     let dir_path = Path::new(dir_str);
-                    let has_parent_traversal = dir_path.components().any(|c| matches!(c, std::path::Component::ParentDir));
+                    let has_parent_traversal = dir_path
+                        .components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir));
                     let is_absolute_or_root = dir_path.is_absolute()
-                        || dir_path.components().any(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Prefix(_)));
-                    let normal_count = dir_path.components().filter(|c| matches!(c, std::path::Component::Normal(_))).count();
+                        || dir_path.components().any(|c| {
+                            matches!(
+                                c,
+                                std::path::Component::RootDir | std::path::Component::Prefix(_)
+                            )
+                        });
+                    let normal_count = dir_path
+                        .components()
+                        .filter(|c| matches!(c, std::path::Component::Normal(_)))
+                        .count();
 
-                    if dir_str.is_empty() || has_parent_traversal || is_absolute_or_root || normal_count == 0 {
+                    if dir_str.is_empty()
+                        || has_parent_traversal
+                        || is_absolute_or_root
+                        || normal_count == 0
+                    {
                         let _ = request.respond(error_response(400, "Invalid restore directory: must be a relative subdirectory without parent traversal"));
                         return Ok(());
                     }
@@ -923,7 +1100,11 @@ fn handle_request(
                     Ok(deleted) => {
                         let resp = SuccessResponse {
                             ok: deleted,
-                            message: if deleted { Some("Deleted".into()) } else { Some("Not found".into()) },
+                            message: if deleted {
+                                Some("Deleted".into())
+                            } else {
+                                Some("Not found".into())
+                            },
                             count: None,
                         };
                         let _ = request.respond(json_response(&resp));
@@ -964,7 +1145,10 @@ fn handle_request(
 
         (Method::Post, "/api/share/create") => {
             #[derive(Deserialize)]
-            struct CreateReq { path: String, expires_in: u64 }
+            struct CreateReq {
+                path: String,
+                expires_in: u64,
+            }
             let mut body = String::new();
             let _ = request.as_reader().read_to_string(&mut body);
             if let Ok(req) = serde_json::from_str::<CreateReq>(&body) {
@@ -984,7 +1168,9 @@ fn handle_request(
         }
         (Method::Post, "/api/share/revoke") => {
             #[derive(Deserialize)]
-            struct RevokeReq { id: String }
+            struct RevokeReq {
+                id: String,
+            }
             let mut body = String::new();
             let _ = request.as_reader().read_to_string(&mut body);
             if let Ok(req) = serde_json::from_str::<RevokeReq>(&body) {
@@ -1003,7 +1189,11 @@ fn handle_request(
                     Ok(deleted) => {
                         let resp = SuccessResponse {
                             ok: deleted,
-                            message: if deleted { Some("File unlinked".into()) } else { Some("File not found".into()) },
+                            message: if deleted {
+                                Some("File unlinked".into())
+                            } else {
+                                Some("File not found".into())
+                            },
                             count: None,
                         };
                         let _ = request.respond(json_response(&resp));
@@ -1035,7 +1225,9 @@ fn handle_request(
                         let w_dir = watcher_ctrl.lock().ok().and_then(|w| w.watch_dir.clone());
                         if let Some(ref wd) = w_dir {
                             let candidate = wd.join(&req.name);
-                            if candidate.exists() || candidate.parent().map(|p| p.exists()).unwrap_or(false) {
+                            if candidate.exists()
+                                || candidate.parent().map(|p| p.exists()).unwrap_or(false)
+                            {
                                 Some(candidate)
                             } else {
                                 None
@@ -1052,7 +1244,8 @@ fn handle_request(
 
                     match engine.rollback_file(&req.name, req.version, disk_target.as_ref()) {
                         Ok((new_version, written_bytes)) => {
-                            let applied_path_str = disk_target.map(|p| p.to_string_lossy().to_string());
+                            let applied_path_str =
+                                disk_target.map(|p| p.to_string_lossy().to_string());
                             let resp = serde_json::json!({
                                 "ok": true,
                                 "name": req.name,
@@ -1065,7 +1258,8 @@ fn handle_request(
                             let _ = request.respond(json_response(&resp));
                         }
                         Err(e) => {
-                            let _ = request.respond(error_response(500, &format!("Rollback failed: {}", e)));
+                            let _ = request
+                                .respond(error_response(500, &format!("Rollback failed: {}", e)));
                         }
                     }
                 }
@@ -1075,44 +1269,40 @@ fn handle_request(
             }
         }
 
-        (Method::Post, "/api/gc") => {
-            match engine.gc() {
-                Ok(stats) => {
-                    let resp = ApiGcResponse {
-                        live_roots: stats.live_roots,
-                        reachable_chunks: stats.reachable_chunks,
-                        chunks_reclaimed: stats.chunks_reclaimed,
-                        manifests_reclaimed: stats.manifests_reclaimed,
-                        active_chunks_retained: stats.active_chunks_retained,
-                    };
-                    let _ = request.respond(json_response(&resp));
-                }
-                Err(e) => {
-                    let _ = request.respond(error_response(500, &e.to_string()));
-                }
+        (Method::Post, "/api/gc") => match engine.gc() {
+            Ok(stats) => {
+                let resp = ApiGcResponse {
+                    live_roots: stats.live_roots,
+                    reachable_chunks: stats.reachable_chunks,
+                    chunks_reclaimed: stats.chunks_reclaimed,
+                    manifests_reclaimed: stats.manifests_reclaimed,
+                    active_chunks_retained: stats.active_chunks_retained,
+                };
+                let _ = request.respond(json_response(&resp));
             }
-        }
+            Err(e) => {
+                let _ = request.respond(error_response(500, &e.to_string()));
+            }
+        },
 
-        (Method::Post, "/api/fsck") => {
-            match engine.fsck() {
-                Ok(rep) => {
-                    let resp = ApiFsckResponse {
-                        is_healthy: rep.is_healthy,
-                        segments_checked: rep.segments_checked,
-                        chunks_checked: rep.chunks_checked,
-                        manifests_checked: rep.manifests_checked,
-                        objects_checked: rep.objects_checked,
-                        corrupted_chunks: rep.corrupted_chunks,
-                        missing_chunks: rep.missing_chunks,
-                        errors: rep.errors,
-                    };
-                    let _ = request.respond(json_response(&resp));
-                }
-                Err(e) => {
-                    let _ = request.respond(error_response(500, &e.to_string()));
-                }
+        (Method::Post, "/api/fsck") => match engine.fsck() {
+            Ok(rep) => {
+                let resp = ApiFsckResponse {
+                    is_healthy: rep.is_healthy,
+                    segments_checked: rep.segments_checked,
+                    chunks_checked: rep.chunks_checked,
+                    manifests_checked: rep.manifests_checked,
+                    objects_checked: rep.objects_checked,
+                    corrupted_chunks: rep.corrupted_chunks,
+                    missing_chunks: rep.missing_chunks,
+                    errors: rep.errors,
+                };
+                let _ = request.respond(json_response(&resp));
             }
-        }
+            Err(e) => {
+                let _ = request.respond(error_response(500, &e.to_string()));
+            }
+        },
 
         (Method::Get, "/api/mount/status") => {
             let mut ctrl = mount_ctrl.lock().unwrap_or_else(|p| p.into_inner());
@@ -1169,7 +1359,10 @@ fn handle_request(
                     8,
                     r,
                 ) {
-                    let _ = request.respond(error_response(500, &format!("Không thể khởi động WebDAV server tại cổng {}: {}", port, e)));
+                    let _ = request.respond(error_response(
+                        500,
+                        &format!("Không thể khởi động WebDAV server tại cổng {}: {}", port, e),
+                    ));
                     return Ok(());
                 }
                 ctrl.stop_flag = Some(stop_flag);
@@ -1195,7 +1388,8 @@ fn handle_request(
                             ctrl.drive_letter = Some('Z');
                         }
                         Err(e) => {
-                            let _ = request.respond(error_response(500, &format!("Không thể gắn ổ Z: {}", e)));
+                            let _ = request
+                                .respond(error_response(500, &format!("Không thể gắn ổ Z: {}", e)));
                             return Ok(());
                         }
                     }
@@ -1246,7 +1440,10 @@ fn handle_request(
                     };
                     let _ = request.respond(json_response(&resp));
                 } else {
-                    let _ = request.respond(error_response(400, "Ổ Z:\\ chưa được kết nối. Hãy bấm nút 'Kết Nối Ổ Đĩa' trước."));
+                    let _ = request.respond(error_response(
+                        400,
+                        "Ổ Z:\\ chưa được kết nối. Hãy bấm nút 'Kết Nối Ổ Đĩa' trước.",
+                    ));
                 }
             }
             #[cfg(not(windows))]
@@ -1263,20 +1460,31 @@ fn handle_request(
 
         (Method::Get, "/api/watcher/status") => {
             let mut ctrl = watcher_ctrl.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(ref h) = ctrl.handle {
-                ctrl.is_running = h.is_running();
+            let status = if let Some(ref handle) = ctrl.handle {
+                let is_running = handle.is_running();
+                let status = handle.status();
+                ctrl.is_running = is_running;
+                ctrl.last_status = Some(status.clone());
+                status
             } else {
                 ctrl.is_running = false;
-            }
-            let resp = ApiWatcherStatus {
-                running: ctrl.is_running,
-                watched_dir: ctrl.watch_dir.as_ref().map(|p| p.display().to_string()),
-                debounce_secs: if ctrl.debounce_secs == 0 { 3 } else { ctrl.debounce_secs },
-                cooldown_secs: if ctrl.cooldown_secs == 0 { 60 } else { ctrl.cooldown_secs },
-                throttle_ms: if ctrl.throttle_ms == 0 { 10 } else { ctrl.throttle_ms },
-                message: None,
+                ctrl.last_status
+                    .clone()
+                    .unwrap_or_else(stopped_watcher_status)
             };
+            let resp = watcher_status_response(&ctrl, status, None);
             let _ = request.respond(json_response(&resp));
+        }
+
+        (Method::Post, "/api/dialog/select-folder") => {
+            let selected = rfd::FileDialog::new()
+                .set_title("Select a folder for Auto-Vault")
+                .pick_folder();
+            let response = serde_json::json!({
+                "ok": selected.is_some(),
+                "path": selected.map(|path| path.display().to_string())
+            });
+            let _ = request.respond(json_response(&response));
         }
 
         (Method::Post, "/api/watcher/start") => {
@@ -1285,20 +1493,42 @@ fn handle_request(
             let req_data: ApiWatcherStartRequest = match serde_json::from_slice(&body) {
                 Ok(d) => d,
                 Err(_) => {
-                    let _ = request.respond(error_response(400, "Invalid JSON body for watcher start"));
+                    let _ =
+                        request.respond(error_response(400, "Invalid JSON body for watcher start"));
                     return Ok(());
                 }
             };
 
-            let target_dir = PathBuf::from(&req_data.dir);
+            let target_dir = PathBuf::from(req_data.dir.trim());
             if !target_dir.is_dir() {
-                let _ = request.respond(error_response(400, "Thư mục không tồn tại / Directory does not exist"));
+                let _ = request.respond(error_response(400, "Directory does not exist"));
                 return Ok(());
             }
 
             let debounce = req_data.debounce_secs.unwrap_or(3);
             let cooldown = req_data.cooldown_secs.unwrap_or(60);
             let throttle = req_data.throttle_ms.unwrap_or(10);
+            if !(1..=60).contains(&debounce) {
+                let _ = request.respond(error_response(
+                    400,
+                    "Debounce must be between 1 and 60 seconds",
+                ));
+                return Ok(());
+            }
+            if !(1..=3600).contains(&cooldown) {
+                let _ = request.respond(error_response(
+                    400,
+                    "Cooldown must be between 1 and 3600 seconds",
+                ));
+                return Ok(());
+            }
+            if throttle > 5000 {
+                let _ = request.respond(error_response(
+                    400,
+                    "I/O throttle must be between 0 and 5000 milliseconds",
+                ));
+                return Ok(());
+            }
 
             let mut ctrl = watcher_ctrl.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(h) = ctrl.handle.take() {
@@ -1313,25 +1543,36 @@ fn handle_request(
             let service = oos_lite_core::watcher::WatcherService::new(Arc::clone(&engine), config);
             match service.start() {
                 Ok(handle) => {
+                    let status = handle.status();
                     ctrl.is_running = true;
                     ctrl.watch_dir = Some(target_dir.clone());
                     ctrl.debounce_secs = debounce;
                     ctrl.cooldown_secs = cooldown;
                     ctrl.throttle_ms = throttle;
+                    ctrl.last_status = Some(status.clone());
                     ctrl.handle = Some(handle);
+                    let _ = engine.metadata_store().save_watcher_config(
+                        &target_dir.display().to_string(),
+                        debounce,
+                        cooldown,
+                        throttle,
+                    );
 
-                    let resp = ApiWatcherStatus {
-                        running: true,
-                        watched_dir: Some(target_dir.display().to_string()),
-                        debounce_secs: debounce,
-                        cooldown_secs: cooldown,
-                        throttle_ms: throttle,
-                        message: Some("Đã kích hoạt Auto-Vault Watcher thành công".to_string()),
-                    };
+                    let resp = watcher_status_response(
+                        &ctrl,
+                        status,
+                        Some(
+                            "Auto-Vault started; initial reconciliation is running in the background"
+                                .to_string(),
+                        ),
+                    );
                     let _ = request.respond(json_response(&resp));
                 }
                 Err(e) => {
-                    let _ = request.respond(error_response(500, &format!("Không thể khởi động Watcher: {}", e)));
+                    let _ = request.respond(error_response(
+                        400,
+                        &format!("Failed to start watcher: {e}"),
+                    ));
                 }
             }
         }
@@ -1339,27 +1580,35 @@ fn handle_request(
         (Method::Post, "/api/watcher/stop") => {
             let mut ctrl = watcher_ctrl.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(h) = ctrl.handle.take() {
+                let mut status = h.status();
                 h.stop();
+                status.phase = WatcherPhase::Stopped;
+                ctrl.last_status = Some(status);
             }
             ctrl.is_running = false;
-            let resp = ApiWatcherStatus {
-                running: false,
-                watched_dir: ctrl.watch_dir.as_ref().map(|p| p.display().to_string()),
-                debounce_secs: ctrl.debounce_secs,
-                cooldown_secs: ctrl.cooldown_secs,
-                throttle_ms: ctrl.throttle_ms,
-                message: Some("Đã tạm dừng Auto-Vault Watcher".to_string()),
-            };
+            let status = ctrl
+                .last_status
+                .clone()
+                .unwrap_or_else(stopped_watcher_status);
+            let resp = watcher_status_response(
+                &ctrl,
+                status,
+                Some(
+                    "Auto-Vault stopped. Stored files and version history remain safely in the vault"
+                        .to_string(),
+                ),
+            );
             let _ = request.respond(json_response(&resp));
         }
 
         (Method::Post, "/api/prune") => {
             let mut body = Vec::new();
             let _ = request.as_reader().read_to_end(&mut body);
-            let req_data: ApiPruneRequest = serde_json::from_slice(&body).unwrap_or(ApiPruneRequest {
-                keep: Some(10),
-                name: None,
-            });
+            let req_data: ApiPruneRequest =
+                serde_json::from_slice(&body).unwrap_or(ApiPruneRequest {
+                    keep: Some(10),
+                    name: None,
+                });
 
             let keep = req_data.keep.unwrap_or(10).max(1);
             let pruned_res = if let Some(ref target_name) = req_data.name {
@@ -1373,12 +1622,18 @@ fn handle_request(
                     let resp = ApiPruneResponse {
                         ok: true,
                         pruned_count: count,
-                        message: format!("Đã dọn dẹp {} phiên bản cũ (giữ lại {} bản gần nhất)", count, keep),
+                        message: format!(
+                            "Đã dọn dẹp {} phiên bản cũ (giữ lại {} bản gần nhất)",
+                            count, keep
+                        ),
                     };
                     let _ = request.respond(json_response(&resp));
                 }
                 Err(e) => {
-                    let _ = request.respond(error_response(500, &format!("Lỗi khi dọn dẹp phiên bản: {}", e)));
+                    let _ = request.respond(error_response(
+                        500,
+                        &format!("Lỗi khi dọn dẹp phiên bản: {}", e),
+                    ));
                 }
             }
         }
@@ -1406,13 +1661,19 @@ fn handle_request(
                         let _ = request.respond(json_response(&body));
                     }
                     Err(e) => {
-                        let _ = request.respond(error_response(500, &format!("Failed to register context menu: {}", e)));
+                        let _ = request.respond(error_response(
+                            500,
+                            &format!("Failed to register context menu: {}", e),
+                        ));
                     }
                 }
             }
             #[cfg(not(windows))]
             {
-                let _ = request.respond(error_response(400, "Context menu only supported on Windows"));
+                let _ = request.respond(error_response(
+                    400,
+                    "Context menu only supported on Windows",
+                ));
             }
         }
         (Method::Post, "/api/shell-ext/disable") => {
@@ -1424,13 +1685,19 @@ fn handle_request(
                         let _ = request.respond(json_response(&body));
                     }
                     Err(e) => {
-                        let _ = request.respond(error_response(500, &format!("Failed to remove context menu: {}", e)));
+                        let _ = request.respond(error_response(
+                            500,
+                            &format!("Failed to remove context menu: {}", e),
+                        ));
                     }
                 }
             }
             #[cfg(not(windows))]
             {
-                let _ = request.respond(error_response(400, "Context menu only supported on Windows"));
+                let _ = request.respond(error_response(
+                    400,
+                    "Context menu only supported on Windows",
+                ));
             }
         }
 

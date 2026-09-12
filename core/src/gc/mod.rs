@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use tracing::info;
 
 use crate::chunk::ChunkId;
-use crate::error::Result;
+use crate::error::{OosLiteError, Result};
 use crate::index::MetadataStore;
 use crate::segment::SegmentStore;
 
@@ -20,7 +20,7 @@ pub struct GcStats {
 pub struct GarbageCollector;
 
 impl GarbageCollector {
-    /// Mark Phase: Scans all live roots (Name Index + Snapshots) and identifies
+    /// Mark Phase: Scans all live roots (Object Index + Snapshots) and identifies
     /// all reachable ChunkIds and ManifestIds.
     pub fn mark(
         metadata_store: &MetadataStore,
@@ -29,16 +29,17 @@ impl GarbageCollector {
         let mut reachable_manifests = HashSet::new();
         let mut live_roots = 0;
 
-        // 1. Scan Name Index (all active named files and all their historical versions)
-        let named_objects = metadata_store.list_named_objects()?;
-        for (_name, _id, record) in named_objects {
+        // Unbound objects still own their history until explicitly deleted or pruned.
+        for record in metadata_store.all_objects() {
+            let record = record?;
             live_roots += 1;
             for version in &record.versions {
                 reachable_manifests.insert(version.manifest_id.clone());
-                if let Some(manifest) = metadata_store.get_manifest(&version.manifest_id)? {
-                    for cid in manifest.chunks {
-                        reachable_chunks.insert(cid);
-                    }
+                let manifest = metadata_store.get_manifest(&version.manifest_id)?.ok_or_else(|| {
+                    OosLiteError::Internal(format!("Object {} references missing manifest {}", record.object_id, version.manifest_id))
+                })?;
+                for cid in manifest.chunks {
+                    reachable_chunks.insert(cid);
                 }
             }
         }
@@ -49,10 +50,11 @@ impl GarbageCollector {
             live_roots += 1;
             for entry in snap.entries {
                 reachable_manifests.insert(entry.manifest_id.clone());
-                if let Some(manifest) = metadata_store.get_manifest(&entry.manifest_id)? {
-                    for cid in manifest.chunks {
-                        reachable_chunks.insert(cid);
-                    }
+                let manifest = metadata_store.get_manifest(&entry.manifest_id)?.ok_or_else(|| {
+                    OosLiteError::Internal(format!("Snapshot {} references missing manifest {}", snap.label, entry.manifest_id))
+                })?;
+                for cid in manifest.chunks {
+                    reachable_chunks.insert(cid);
                 }
             }
         }

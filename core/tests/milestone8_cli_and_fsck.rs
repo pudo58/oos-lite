@@ -153,3 +153,16 @@ fn test_milestone8_get_specific_version() {
     let err = engine.get_file_version("doc.txt", Some(99), &out_v99);
     assert!(err.is_err());
 }
+
+#[test]
+fn test_physical_disk_size_counts_the_entire_store_directory() {
+    let dir = tempdir().expect("tempdir failed");
+    let store_dir = dir.path().join("store");
+    let engine = StorageEngine::open(&store_dir).expect("engine open failed");
+    let before = engine.stats().physical_disk_bytes;
+
+    std::fs::write(store_dir.join("extra-store-data.bin"), vec![0x5a; 64 * 1024]).unwrap();
+
+    let after = engine.stats().physical_disk_bytes;
+    assert!(after >= before + 64 * 1024);
+}

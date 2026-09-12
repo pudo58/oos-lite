@@ -134,6 +134,7 @@ impl SegmentStore {
 
         let mut latest_id = 1;
         let mut latest_valid_offset = 0;
+        let newest_id = *segment_ids.last().unwrap();
 
         for &seg_id in &segment_ids {
             latest_id = seg_id;
@@ -164,11 +165,12 @@ impl SegmentStore {
 
                         // Verify payload existence and CRC
                         if current_offset + record_len > file_len {
-                            warn!(
-                                segment = seg_id,
-                                offset = current_offset,
-                                "Incomplete record payload detected, truncating segment to valid point"
-                            );
+                            if seg_id != newest_id {
+                                return Err(OosLiteError::CorruptedSegment {
+                                    offset: current_offset,
+                                    reason: format!("Incomplete payload in sealed segment {}", path.display()),
+                                });
+                            }
                             file.set_len(current_offset)?;
                             file.sync_all()?;
                             break;
@@ -179,14 +181,10 @@ impl SegmentStore {
 
                         let actual_crc = crc32fast::hash(&payload_buf);
                         if actual_crc != header.payload_crc {
-                            warn!(
-                                segment = seg_id,
-                                offset = current_offset,
-                                "Corrupted payload CRC at tail, truncating segment to valid point"
-                            );
-                            file.set_len(current_offset)?;
-                            file.sync_all()?;
-                            break;
+                            return Err(OosLiteError::CorruptedSegment {
+                                offset: current_offset,
+                                reason: format!("Payload checksum mismatch in {}", path.display()),
+                            });
                         }
 
                         // Record is 100% valid -> index it
@@ -204,11 +202,25 @@ impl SegmentStore {
                         current_offset += record_len;
                     }
                     Ok(None) => {
-                        // Clean EOF
+                        // read_from also returns None for a 1-3 byte magic fragment.
+                        if seg_id != newest_id {
+                            return Err(OosLiteError::CorruptedSegment {
+                                offset: current_offset,
+                                reason: format!("Incomplete header in sealed segment {}", path.display()),
+                            });
+                        }
+                        file.set_len(current_offset)?;
+                        file.sync_all()?;
                         break;
                     }
                     Err(err) => {
-                        // Corrupted record header at tail due to crash
+                        if seg_id != newest_id || err.kind() != std::io::ErrorKind::UnexpectedEof {
+                            return Err(OosLiteError::CorruptedSegment {
+                                offset: current_offset,
+                                reason: format!("Invalid record header in {}: {err}", path.display()),
+                            });
+                        }
+                        // Only an incomplete header at the active tail is repairable.
                         warn!(
                             segment = seg_id,
                             offset = current_offset,

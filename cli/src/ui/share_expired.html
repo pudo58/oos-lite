@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Liên kết đã hết hạn · OOS-Lite Secure Drop</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%23087f70'/><path d='M30 35 L70 35 L70 65 L30 65 Z' fill='none' stroke='white' stroke-width='8'/><circle cx='50' cy='50' r='8' fill='white'/></svg>">
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #252a2d;
+      --muted: #747c80;
+      --line: #e5e8e9;
+      --soft: #f5f7f7;
+      --card-bg: #ffffff;
+      --accent: #087f70;
+      --danger: #b9444b;
+      --danger-soft: #fff0f0;
+      --danger-border: #ffd8d8;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; letter-spacing: 0 !important; }
+
+    body {
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 13px;
+      background-color: #f7f8f8;
+      color: var(--ink);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 32px 16px;
+      line-height: 1.5;
+    }
+
+    .container { width: 100%; max-width: 440px; }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 36px 24px;
+      text-align: center;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+    }
+
+    .icon-box {
+      width: 52px;
+      height: 52px;
+      border-radius: 8px;
+      background: var(--danger-soft);
+      border: 1px solid var(--danger-border);
+      color: var(--danger);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 16px;
+    }
+
+    .icon-box svg { width: 26px; height: 26px; }
+
+    h1 { font-size: 16px; font-weight: 600; color: var(--ink); margin-bottom: 8px; }
+
+    p { font-size: 13px; color: var(--muted); line-height: 1.6; margin-bottom: 16px; }
+
+    .file-ref {
+      font-family: 'JetBrains Mono', Consolas, monospace;
+      background: var(--soft);
+      border: 1px solid var(--line);
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: var(--ink);
+      font-size: 12px;
+    }
+
+    .page-footer { margin-top: 20px; text-align: center; font-size: 11px; color: #8b9490; }
+    .page-footer a { color: var(--accent); text-decoration: none; }
+    .page-footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <div class="icon-box">
+        <svg fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+      </div>
+      <h1>Liên kết đã hết hạn</h1>
+      <p>
+        Liên kết tải tệp <span class="file-ref">{{FILE_NAME}}</span> đã quá thời hạn tồn tại do người gửi thiết lập hoặc đã bị thu hồi khỏi kho lưu trữ.
+      </p>
+      <p style="font-size: 11px; color: #949c98; margin-bottom: 0;">
+        Vui lòng liên hệ người gửi để nhận liên kết chia sẻ mới.
+      </p>
+    </div>
+    <div class="page-footer">
+      Powered by <a href="https://github.com/pudo58/oos-lite" target="_blank" rel="noopener noreferrer">OOS-Lite Vault</a> · Local & Deduplicated Storage
+    </div>
+  </div>
+</body>
+</html>

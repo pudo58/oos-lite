@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tải tệp an toàn · OOS-Lite Secure Drop</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%23087f70'/><path d='M30 35 L70 35 L70 65 L30 65 Z' fill='none' stroke='white' stroke-width='8'/><circle cx='50' cy='50' r='8' fill='white'/></svg>">
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #252a2d;
+      --muted: #747c80;
+      --line: #e5e8e9;
+      --soft: #f5f7f7;
+      --card-bg: #ffffff;
+      --accent: #087f70;
+      --accent-hover: #06695c;
+      --accent-soft: #e8f3ef;
+      --accent-border: #c7e4da;
+      --danger: #b9444b;
+      --danger-soft: #fff0f0;
+      --danger-border: #ffd8d8;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      letter-spacing: 0 !important;
+    }
+
+    body {
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 13px;
+      background-color: #f7f8f8;
+      color: var(--ink);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 32px 16px;
+      line-height: 1.5;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 440px;
+    }
+
+    /* Brand Header */
+    .app-brand-link {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      text-decoration: none;
+      color: inherit;
+      margin-bottom: 22px;
+      justify-content: center;
+    }
+
+    .brand-symbol {
+      display: grid;
+      place-items: center;
+      width: 38px;
+      height: 38px;
+      color: #fff;
+      background: var(--accent);
+      border-radius: 8px;
+      box-shadow: 0 2px 6px rgba(8, 127, 112, 0.25);
+    }
+
+    .brand-symbol svg {
+      width: 22px;
+      height: 22px;
+    }
+
+    .brand-title-wrap {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .brand-name {
+      font-size: 18px;
+      font-weight: 650;
+      color: var(--ink);
+      line-height: 1.2;
+    }
+
+    .brand-caption {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      margin-top: 2px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #35a67c;
+      display: inline-block;
+    }
+
+    /* Main Card */
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 26px 24px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+    }
+
+    .card-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--ink);
+      margin-bottom: 4px;
+    }
+
+    .card-subtitle {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 20px;
+    }
+
+    /* File Box */
+    .file-box {
+      background: var(--soft);
+      border: 1px solid #edf0ee;
+      border-radius: 6px;
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+
+    .file-type-icon {
+      width: 40px;
+      height: 44px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: #f0f4f9;
+      color: #6985b1;
+      border-radius: 6px;
+      flex-shrink: 0;
+    }
+
+    .file-type-icon.archive { background: #f8eff0; color: #b9848b; }
+    .file-type-icon.document { background: #fbf3e6; color: #bd9547; }
+    .file-type-icon.code { background: #eff0fa; color: #8b84b9; }
+    .file-type-icon.image { background: #edf5f0; color: #6c9a7d; }
+
+    .file-type-icon svg {
+      width: 22px;
+      height: 22px;
+    }
+
+    .file-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .file-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: #3c4841;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .file-path {
+      font-size: 11px;
+      color: #7e8b83;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 2px;
+      margin-bottom: 6px;
+    }
+
+    .file-badges {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .version-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 7px;
+      border: 1px solid #dce9e3;
+      color: #56816b;
+      background: #f1f7f3;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    .version-tag svg {
+      width: 12px;
+      height: 12px;
+    }
+
+    .badge-expiry {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 7px;
+      border: 1px solid #f3dec2;
+      color: #a97018;
+      background: #fff7e7;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    .badge-expiry svg {
+      width: 12px;
+      height: 12px;
+    }
+
+    /* Error Alert */
+    .error-alert {
+      background: var(--danger-soft);
+      border: 1px solid var(--danger-border);
+      color: var(--danger);
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      margin-bottom: 18px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .error-alert svg {
+      width: 16px;
+      height: 16px;
+      flex-shrink: 0;
+    }
+
+    /* Form & Inputs */
+    .form-group {
+      margin-bottom: 18px;
+    }
+
+    .form-label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      color: #414b47;
+      margin-bottom: 6px;
+    }
+
+    .input-wrapper {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+
+    .input-icon-left {
+      position: absolute;
+      left: 12px;
+      width: 16px;
+      height: 16px;
+      color: #909b95;
+      pointer-events: none;
+    }
+
+    .input-control {
+      width: 100%;
+      height: 40px;
+      padding: 0 40px 0 36px;
+      background: #ffffff;
+      border: 1px solid #d9dfe0;
+      border-radius: 5px;
+      color: var(--ink);
+      font-size: 13px;
+      font-family: 'JetBrains Mono', Consolas, monospace;
+      outline: none;
+      transition: all 0.15s ease;
+    }
+
+    .input-control:focus {
+      border-color: var(--accent);
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
+
+    .input-control::placeholder {
+      color: #939b9e;
+      font-family: Inter, sans-serif;
+    }
+
+    .btn-toggle-pwd {
+      position: absolute;
+      right: 10px;
+      background: transparent;
+      border: none;
+      color: #7a8580;
+      cursor: pointer;
+      padding: 6px;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: color 0.15s;
+    }
+
+    .btn-toggle-pwd:hover {
+      color: var(--accent);
+    }
+
+    /* Primary Button */
+    .primary-button {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      width: 100%;
+      min-height: 42px;
+      padding: 10px 16px;
+      background: var(--accent);
+      color: #ffffff;
+      border: 1px solid var(--accent);
+      border-radius: 5px;
+      font-size: 13px;
+      font-weight: 550;
+      cursor: pointer;
+      transition: background 0.15s ease;
+    }
+
+    .primary-button:hover {
+      background: var(--accent-hover);
+      border-color: var(--accent-hover);
+    }
+
+    .primary-button:disabled {
+      opacity: 0.65;
+      cursor: not-allowed;
+    }
+
+    .primary-button svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    /* Notice Card */
+    .info-strip {
+      margin-top: 18px;
+      padding: 11px 13px;
+      border-radius: 6px;
+      background: var(--soft);
+      border: 1px solid #edf0ee;
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      font-size: 11px;
+      color: #687872;
+      line-height: 1.5;
+    }
+
+    .info-strip svg {
+      width: 14px;
+      height: 14px;
+      color: var(--accent);
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+
+    /* GitHub Promo Card */
+    .github-card {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border: 1px solid #dde3e3;
+      padding: 12px 16px;
+      background: #ffffff;
+      border-radius: 6px;
+      margin-top: 16px;
+      text-decoration: none;
+      color: inherit;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+      transition: all 0.15s ease;
+    }
+
+    .github-card:hover {
+      background: #fafcfb;
+      border-color: var(--accent-border);
+    }
+
+    .github-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .github-avatar {
+      width: 34px;
+      height: 34px;
+      border-radius: 6px;
+      background: #f0f4f3;
+      display: grid;
+      place-items: center;
+      color: #252a2d;
+      flex-shrink: 0;
+    }
+
+    .github-avatar svg {
+      width: 18px;
+      height: 18px;
+    }
+
+    .github-meta {
+      min-width: 0;
+    }
+
+    .github-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: #303b36;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .github-badge {
+      font-size: 10px;
+      font-weight: 500;
+      padding: 1px 5px;
+      border-radius: 3px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid var(--accent-border);
+    }
+
+    .github-desc {
+      font-size: 10px;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 2px;
+    }
+
+    .github-action {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 5px 10px;
+      border-radius: 4px;
+      border: 1px solid #dce9e3;
+      background: #f1f7f3;
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 600;
+      flex-shrink: 0;
+      transition: background 0.15s ease;
+    }
+
+    .github-card:hover .github-action {
+      background: var(--accent);
+      color: #ffffff;
+      border-color: var(--accent);
+    }
+
+    .github-action svg {
+      width: 12px;
+      height: 12px;
+    }
+
+    /* Page Footer */
+    .page-footer {
+      margin-top: 20px;
+      text-align: center;
+      font-size: 11px;
+      color: #8b9490;
+    }
+
+    .page-footer a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    .page-footer a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <!-- App Brand Header -->
+    <a href="https://github.com/pudo58/oos-lite" target="_blank" rel="noopener noreferrer" class="app-brand-link" title="Khám phá OOS-Lite trên GitHub">
+      <div class="brand-symbol">
+        <svg fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+        </svg>
+      </div>
+      <div class="brand-title-wrap">
+        <span class="brand-name">OOS-Lite</span>
+        <span class="brand-caption">
+          <span class="status-dot"></span>
+          <span>SECURE DROP · CHIA SẺ AN TOÀN</span>
+        </span>
+      </div>
+    </a>
+
+    <!-- Main Card -->
+    <div class="card">
+      {{ERROR_HTML}}
+
+      <div class="file-box">
+        <div class="file-type-icon {{FILE_ICON_CLASS}}">
+          {{FILE_ICON_SVG}}
+        </div>
+        <div class="file-info">
+          <div class="file-name" title="{{FILE_PATH}}">{{FILE_NAME}}</div>
+          <div class="file-path">{{FILE_PATH}}</div>
+          <div class="file-badges">
+            <span class="badge-expiry">
+              <svg fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+              </svg>
+              {{EXPIRES_BADGE}}
+            </span>
+            {{EXTRA_BADGES}}
+          </div>
+        </div>
+      </div>
+
+      <form id="downloadForm" action="/s/{{SHARE_ID}}/download" method="GET">
+        <div class="form-group">
+          <label class="form-label" for="tokenInput">Mật khẩu tải tệp:</label>
+          <div class="input-wrapper">
+            <svg class="input-icon-left" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
+            </svg>
+            <input
+              type="password"
+              id="tokenInput"
+              name="token"
+              value="{{TOKEN_VALUE}}"
+              placeholder="Nhập mật khẩu do người gửi cung cấp..."
+              class="input-control"
+              required
+              autofocus
+            />
+            <button type="button" class="btn-toggle-pwd" id="togglePwdBtn" title="Hiển thị / Ẩn mật khẩu">
+              <svg id="eyeIcon" style="width: 16px; height: 16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <button type="submit" class="primary-button" id="submitBtn">
+          <svg fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+          </svg>
+          <span id="btnText">{{DOWNLOAD_BTN_TEXT}}</span>
+        </button>
+      </form>
+
+      <div class="info-strip">
+        <svg fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+        <span>{{PAYLOAD_DESC}}</span>
+      </div>
+    </div>
+
+    <!-- GitHub Promo Card -->
+    <a href="https://github.com/pudo58/oos-lite" target="_blank" rel="noopener noreferrer" class="github-card" title="Xem mã nguồn OOS-Lite trên GitHub">
+      <div class="github-left">
+        <div class="github-avatar">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+        </div>
+        <div class="github-meta">
+          <div class="github-title">
+            <span>pudo58 / oos-lite</span>
+            <span class="github-badge">Open Source</span>
+          </div>
+          <div class="github-desc">Kho lưu trữ & mã hóa dữ liệu cá nhân trên thiết bị</div>
+        </div>
+      </div>
+      <div class="github-action">
+        <svg fill="currentColor" viewBox="0 0 24 24"><path d="M12 .587l3.668 7.431 8.2 1.192-5.934 5.784 1.399 8.165-7.333-3.856-7.333 3.856 1.399-8.165-5.934-5.784 8.2-1.192zm0 5.702l-2.223 4.505-4.971.722 3.597 3.506-.849 4.95 4.446-2.338 4.446 2.338-.849-4.95 3.597-3.506-4.971-.722z"/></svg>
+        <span>GitHub ↗</span>
+      </div>
+    </a>
+
+    <div class="page-footer">
+      Powered by <a href="https://github.com/pudo58/oos-lite" target="_blank" rel="noopener noreferrer">OOS-Lite Vault</a> · Local & Deduplicated Storage
+    </div>
+  </div>
+
+  <script>
+    const tokenInput = document.getElementById('tokenInput');
+    const togglePwdBtn = document.getElementById('togglePwdBtn');
+    const eyeIcon = document.getElementById('eyeIcon');
+    const downloadForm = document.getElementById('downloadForm');
+    const submitBtn = document.getElementById('submitBtn');
+    const btnText = document.getElementById('btnText');
+
+    togglePwdBtn.addEventListener('click', () => {
+      if (tokenInput.type === 'password') {
+        tokenInput.type = 'text';
+        eyeIcon.innerHTML = `
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.29 3.29m0 0a10.05 10.05 0 015.71-1.58c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0l-3.29-3.29"/>
+        `;
+      } else {
+        tokenInput.type = 'password';
+        eyeIcon.innerHTML = `
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+        `;
+      }
+    });
+
+    const initialBtnText = btnText.textContent;
+    downloadForm.addEventListener('submit', () => {
+      btnText.textContent = 'Đang chuẩn bị & tải về...';
+      submitBtn.disabled = true;
+      setTimeout(() => {
+        btnText.textContent = initialBtnText;
+        submitBtn.disabled = false;
+      }, 5000);
+    });
+  </script>
+</body>
+</html>

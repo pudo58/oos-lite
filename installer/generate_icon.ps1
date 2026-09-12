@@ -1,102 +1,144 @@
 Add-Type -AssemblyName System.Drawing
 
-$size = 256
-$bmp = New-Object System.Drawing.Bitmap($size, $size)
-$g = [System.Drawing.Graphics]::FromImage($bmp)
-$g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-$g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+$root = Split-Path -Parent $PSScriptRoot
+$svgPath = Join-Path $PSScriptRoot "app-icon.svg"
 
-# 1. Background rounded rectangle
-$path = New-Object System.Drawing.Drawing2D.GraphicsPath
-$r = 52
-$rect = New-Object System.Drawing.Rectangle(12, 12, 232, 232)
-$path.AddArc($rect.X, $rect.Y, $r, $r, 180, 90)
-$path.AddArc($rect.Right - $r, $rect.Y, $r, $r, 270, 90)
-$path.AddArc($rect.Right - $r, $rect.Bottom - $r, $r, $r, 0, 90)
-$path.AddArc($rect.X, $rect.Bottom - $r, $r, $r, 90, 90)
-$path.CloseFigure()
+# 1. Prepare HTML harness for Edge rendering
+$renderHtml = Join-Path $PSScriptRoot "temp_render.html"
+$svgContent = Get-Content -Path $svgPath -Raw
+$html = @"
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 512px; height: 512px; background: transparent; overflow: hidden; }
+  svg { width: 512px; height: 512px; display: block; }
+</style>
+</head>
+<body>
+$svgContent
+</body>
+</html>
+"@
+[System.IO.File]::WriteAllText($renderHtml, $html, [System.Text.Encoding]::UTF8)
 
-# Dark Indigo to Deep Slate gradient
-$brush = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
-    (New-Object System.Drawing.Point(0, 0)),
-    (New-Object System.Drawing.Point($size, $size)),
-    [System.Drawing.Color]::FromArgb(255, 30, 27, 75),   # Deep Indigo #1e1b4b
-    [System.Drawing.Color]::FromArgb(255, 15, 23, 42)    # Slate 900 #0f172a
+# 2. Render 512x512 master PNG using Edge headless
+$edgePath = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+$png512 = Join-Path $PSScriptRoot "app-icon-512.png"
+
+$args = @(
+    "--headless",
+    "--disable-gpu",
+    "--hide-scrollbars",
+    "--default-background-color=00000000",
+    "--window-size=512,512",
+    "--screenshot=$png512",
+    "file:///$renderHtml"
 )
-$g.FillPath($brush, $path)
+Start-Process -FilePath $edgePath -ArgumentList $args -Wait -NoNewWindow
+Remove-Item -Path $renderHtml -Force -ErrorAction SilentlyContinue
 
-# Subtle outer border glow
-$penGlow = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(160, 99, 102, 241), 5) # Indigo 500
-$g.DrawPath($penGlow, $path)
+if (-not (Test-Path $png512)) {
+    Write-Error "Failed to generate master 512x512 PNG"
+    exit 1
+}
 
-# 2. Outer Vault Tech Ring
-$ringPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(255, 56, 189, 248), 12) # Sky 400
-$g.DrawEllipse($ringPen, 64, 56, 128, 128)
+Write-Host "Generated master PNG: $png512"
 
-# 3. Vault Dial Teeth (4 ticks around ring)
-$dialPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(200, 129, 140, 248), 8)
-$g.DrawLine($dialPen, 128, 42, 128, 56)
-$g.DrawLine($dialPen, 128, 184, 128, 198)
-$g.DrawLine($dialPen, 50, 120, 64, 120)
-$g.DrawLine($dialPen, 192, 120, 206, 120)
+# 3. Load master bitmap and generate sizes
+$masterBmp = [System.Drawing.Bitmap]::FromFile($png512)
 
-# 4. Center Padlock / Vault Core
-$lockBodyBrush = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
-    (New-Object System.Drawing.Point(92, 110)),
-    (New-Object System.Drawing.Point(164, 168)),
-    [System.Drawing.Color]::FromArgb(255, 99, 102, 241),  # Indigo 500
-    [System.Drawing.Color]::FromArgb(255, 79, 70, 229)   # Indigo 600
+function Resize-Bitmap($src, $targetW, $targetH) {
+    $dest = New-Object System.Drawing.Bitmap($targetW, $targetH, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $g = [System.Drawing.Graphics]::FromImage($dest)
+    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+    $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+    $g.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
+    $g.Clear([System.Drawing.Color]::Transparent)
+    $g.DrawImage($src, (New-Object System.Drawing.Rectangle(0, 0, $targetW, $targetH)))
+    $g.Dispose()
+    return $dest
+}
+
+# Sizes to include in multi-resolution ICO
+$sizes = @(256, 128, 64, 48, 32, 16)
+$imagesData = @()
+
+foreach ($sz in $sizes) {
+    $resized = Resize-Bitmap $masterBmp $sz $sz
+    $ms = New-Object System.IO.MemoryStream
+    $resized.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+    $bytes = $ms.ToArray()
+    $ms.Dispose()
+    $resized.Dispose()
+    $imagesData += ,@($sz, $bytes)
+}
+
+# Also save 256 PNG standalone for docs/support
+$png256Path = Join-Path $PSScriptRoot "app-icon-256.png"
+$bmp256 = Resize-Bitmap $masterBmp 256 256
+$bmp256.Save($png256Path, [System.Drawing.Imaging.ImageFormat]::Png)
+$bmp256.Dispose()
+
+$masterBmp.Dispose()
+
+# 4. Pack into standard ICO format
+$icoMs = New-Object System.IO.MemoryStream
+$bw = New-Object System.IO.BinaryWriter($icoMs)
+
+# ICO Header
+$bw.Write([UInt16]0)                  # Reserved
+$bw.Write([UInt16]1)                  # Type 1 = ICO
+$bw.Write([UInt16]$imagesData.Count)  # Image count
+
+# Calculate offsets
+# Header (6 bytes) + Directory Entries (16 bytes each)
+$offset = 6 + (16 * $imagesData.Count)
+
+foreach ($item in $imagesData) {
+    $sz = $item[0]
+    $data = $item[1]
+
+    $wByte = if ($sz -ge 256) { [byte]0 } else { [byte]$sz }
+    $hByte = if ($sz -ge 256) { [byte]0 } else { [byte]$sz }
+
+    $bw.Write([byte]$wByte)           # Width
+    $bw.Write([byte]$hByte)           # Height
+    $bw.Write([byte]0)                # Color palette count
+    $bw.Write([byte]0)                # Reserved
+    $bw.Write([UInt16]1)              # Color planes
+    $bw.Write([UInt16]32)             # Bits per pixel
+    $bw.Write([UInt32]$data.Length)   # Image size in bytes
+    $bw.Write([UInt32]$offset)        # File offset
+
+    $offset += $data.Length
+}
+
+# Write image streams
+foreach ($item in $imagesData) {
+    $bw.Write($item[1])
+}
+
+$bw.Flush()
+$icoBytes = $icoMs.ToArray()
+$bw.Dispose()
+$icoMs.Dispose()
+
+# 5. Distribute ICO to destinations
+$destinations = @(
+    (Join-Path $PSScriptRoot "app.ico"),
+    (Join-Path $root "cli\app.ico"),
+    (Join-Path $root "docs\support\app.ico")
 )
-$lockBodyPath = New-Object System.Drawing.Drawing2D.GraphicsPath
-$br = 16
-$lRect = New-Object System.Drawing.Rectangle(94, 114, 68, 54)
-$lockBodyPath.AddArc($lRect.X, $lRect.Y, $br, $br, 180, 90)
-$lockBodyPath.AddArc($lRect.Right - $br, $lRect.Y, $br, $br, 270, 90)
-$lockBodyPath.AddArc($lRect.Right - $br, $lRect.Bottom - $br, $br, $br, 0, 90)
-$lockBodyPath.AddArc($lRect.X, $lRect.Bottom - $br, $br, $br, 90, 90)
-$lockBodyPath.CloseFigure()
-$g.FillPath($lockBodyBrush, $lockBodyPath)
 
-# 5. Padlock Shackle (Arch)
-$shacklePen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(255, 224, 231, 255), 10)
-$shacklePath = New-Object System.Drawing.Drawing2D.GraphicsPath
-$shacklePath.AddArc(106, 82, 44, 46, 180, 180)
-$shacklePath.AddLine(150, 105, 150, 118)
-$g.DrawPath($shacklePen, $shacklePath)
+foreach ($dst in $destinations) {
+    $dir = Split-Path -Parent $dst
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    [System.IO.File]::WriteAllBytes($dst, $icoBytes)
+    Write-Host "Updated icon at: $dst ($($icoBytes.Length) bytes)"
+}
 
-# 6. Keyhole in Lock Body
-$khBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, 15, 23, 42))
-$g.FillEllipse($khBrush, 122, 128, 12, 12)
-$khPoly = @(
-    (New-Object System.Drawing.Point(124, 136)),
-    (New-Object System.Drawing.Point(132, 136)),
-    (New-Object System.Drawing.Point(135, 152)),
-    (New-Object System.Drawing.Point(121, 152))
-)
-$g.FillPolygon($khBrush, $khPoly)
-
-# Clean graphics
-$g.Dispose()
-
-# Save ICO
-$hIcon = $bmp.GetHicon()
-$icon = [System.Drawing.Icon]::FromHandle($hIcon)
-
-$destDir1 = "installer"
-$destDir2 = "cli"
-New-Item -ItemType Directory -Force -Path $destDir1 | Out-Null
-New-Item -ItemType Directory -Force -Path $destDir2 | Out-Null
-
-$outPath1 = Join-Path $destDir1 "app.ico"
-$outPath2 = Join-Path $destDir2 "app.ico"
-
-$fs1 = [System.IO.File]::Open($outPath1, [System.IO.FileMode]::Create)
-$icon.Save($fs1)
-$fs1.Close()
-
-$fs2 = [System.IO.File]::Open($outPath2, [System.IO.FileMode]::Create)
-$icon.Save($fs2)
-$fs2.Close()
-
-$bmp.Dispose()
-Write-Host "Icons generated successfully at $outPath1 and $outPath2"
+Write-Host "Multi-resolution icon generation complete!"

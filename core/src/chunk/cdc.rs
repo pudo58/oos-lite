@@ -90,6 +90,10 @@ impl<R: std::io::Read> StreamChunker<R> {
         }
     }
 
+    pub fn into_inner(self) -> R {
+        self.reader
+    }
+
     /// Pulls the next chunk from the stream.
     /// Memory consumption is strictly bounded by ~1 MiB regardless of total stream size.
     pub fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, std::io::Error> {

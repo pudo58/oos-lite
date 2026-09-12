@@ -1,61 +1,91 @@
-## OOS-Lite v0.2.3 - Core Durability and Recovery Fixes
+## OOS-Lite v1.0.0 - Reliable Local-First Storage
 
-This patch release fixes several storage-engine failure modes and improves large-file ingestion without changing the public API or on-disk formats.
+OOS-Lite 1.0 is the first stable release of the local-first, content-addressed file vault. It combines version history, FastCDC chunk deduplication, snapshots, encryption at rest, live folder synchronization, recovery tooling, a desktop-oriented Web UI, and native Windows/Linux executables.
 
-### Core fixes
+Existing OOS-Lite stores, segment files, metadata, and WAL records remain compatible. No migration is required when upgrading from 0.2.x.
 
-- Fixed GC rollback after a crash during a partial multi-segment swap. Original segments that had not yet been renamed are now preserved.
-- Fixed a race during encrypted-store initialization by acquiring the exclusive store lock before reading or creating `vault.key`.
-- Changed new writes to stream chunks directly into durable segment storage. WAL records now contain metadata and manifests instead of retaining all new file data in memory.
-- Added WAL recovery validation so metadata is never committed when a manifest references a missing durable chunk.
-- Added checked WAL length conversions for names, manifests, chunk counts, chunk sizes, total payload size, and encryption overhead.
-- Fixed watcher reconciliation so same-size content changes are detected with BLAKE3.
-- Standardized the remaining core decryption error message in English.
+### Highlights
 
-Existing WAL records containing chunk data remain readable. Existing vaults and segment files require no migration.
+- Redesigned the dashboard as a compact, light desktop application with list, tree, and grid file views, a file inspector, responsive navigation, search, sorting, previews, version history, snapshots, and maintenance tools.
+- Added polished public download and expiration pages for secure shares.
+- Added folder sharing with on-demand ZIP creation while preserving single-file downloads.
+- Improved watcher status reporting, directory selection, retry visibility, and English/Vietnamese localization. English is now the default UI language.
+
+### Storage reliability
+
+- Recovery now distinguishes an incomplete tail write from a complete but corrupted segment record. Only a torn tail in the newest segment is truncated; CRC, magic, and older-segment corruption return a precise error without modifying data.
+- GC rollback preserves segments that were not renamed before a crash and restores only files with a matching `.seg.old` backup.
+- GC and FSCK now retain and validate object history after a name is unbound, including history reachable only through `ObjectId` and snapshots.
+- Encrypted-store initialization now acquires the exclusive store lock before reading or creating `vault.key`, preventing concurrent processes from generating different master keys.
+- Large-file ingestion streams chunks directly into segment storage instead of buffering the full payload in WAL memory.
+- WAL recovery verifies that every manifest chunk is durable before committing metadata, rejects values that exceed on-disk integer limits, and remains compatible with legacy WAL records containing chunk data.
+- Error messages emitted by the core are standardized in English.
+
+### Watcher correctness
+
+- Reconciliation hashes same-size files with BLAKE3, so offline edits are detected even when file size does not change.
+- Scan and metadata errors no longer look like deletions. An incomplete scan enters `Degraded` state and skips destructive reconciliation.
+- Ordered rename handling preserves one object history across rename-then-modify and chained rename events.
+- Directory rename and deletion update every managed child using path-component boundaries, including moves into or out of ignored paths.
+- Watch roots are normalized to absolute paths and checked against store overlap.
+- Files locked during startup are retried with bounded backoff until readable, removed, or the watcher stops.
 
 ### Windows installation
 
-Download `OOS-Lite-Setup-v0.2.3.exe` and run the installer. The portable package `oos-lite-windows-x86_64-v0.2.3.zip` is also available for use without installation.
+Download `OOS-Lite-Setup-v1.0.0.exe` and run it. The installer includes the CLI and desktop GUI, and can optionally add OOS-Lite to your user `PATH` and Windows Explorer context menu.
+
+For a portable installation, download and extract `oos-lite-windows-x86_64-v1.0.0.zip`, then run:
+
+```powershell
+.\oos-lite.exe --version
+.\oos-lite-gui.exe
+```
+
+The binaries are currently unsigned, so Microsoft Defender SmartScreen may show an "Unknown publisher" warning.
 
 ### Linux installation
 
-OOS-Lite requires FUSE 3 for virtual filesystem mounting.
+The Linux build targets x86_64 glibc systems. On Ubuntu or Debian, install the runtime libraries first:
 
 ```bash
-# Ubuntu / Debian dependencies
 sudo apt update
-sudo apt install -y libfuse3-3 fuse3
+sudo apt install -y libfuse3-3 libwayland-client0 libxkbcommon0 libdbus-1-3
+```
 
-# Download and extract OOS-Lite
-wget https://github.com/pudo58/oos-lite/releases/download/v0.2.3/oos-lite-linux-x86_64-v0.2.3.tar.gz
-mkdir -p "$HOME/.local/share/oos-lite"
-tar -xzf oos-lite-linux-x86_64-v0.2.3.tar.gz -C "$HOME/.local/share/oos-lite"
+Download, verify, and install OOS-Lite for the current user:
 
-# Install the CLI and GUI launcher for the current user
-mkdir -p "$HOME/.local/bin"
+```bash
+wget https://github.com/pudo58/oos-lite/releases/download/v1.0.0/oos-lite-linux-x86_64-v1.0.0.tar.gz
+wget https://github.com/pudo58/oos-lite/releases/download/v1.0.0/SHA256SUMS.txt
+sha256sum --check SHA256SUMS.txt --ignore-missing
+
+mkdir -p "$HOME/.local/share/oos-lite" "$HOME/.local/bin"
+tar -xzf oos-lite-linux-x86_64-v1.0.0.tar.gz -C "$HOME/.local/share/oos-lite"
 ln -sf "$HOME/.local/share/oos-lite/oos-lite" "$HOME/.local/bin/oos-lite"
 ln -sf "$HOME/.local/share/oos-lite/oos-lite-gui" "$HOME/.local/bin/oos-lite-gui"
-
-# Ensure ~/.local/bin is available in the current shell
 export PATH="$HOME/.local/bin:$PATH"
 
-# Verify and initialize a store
 oos-lite --version
 oos-lite --store-dir "$HOME/.oos-store" init
+oos-lite-gui
 ```
 
-To keep `~/.local/bin` on `PATH`, add the following line to `~/.bashrc` or `~/.zshrc`:
+To keep the command available after restarting your shell, add this line to `~/.bashrc` or `~/.zshrc`:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-For an encrypted store, initialize with `oos-lite --store-dir "$HOME/.oos-store" --password YOUR_PASSWORD init`.
+For encrypted initialization, avoid putting a passphrase directly in shell history. Store it in a protected file and use:
+
+```bash
+chmod 600 "$HOME/.oos-password"
+oos-lite --store-dir "$HOME/.oos-store" --password-file "$HOME/.oos-password" init
+```
 
 ### Release assets
 
-- `OOS-Lite-Setup-v0.2.3.exe` - Windows installer
-- `oos-lite-windows-x86_64-v0.2.3.zip` - Windows portable binaries
-- `oos-lite-linux-x86_64-v0.2.3.tar.gz` - Linux x86_64 binaries
+- `OOS-Lite-Setup-v1.0.0.exe` - Windows installer
+- `oos-lite-windows-x86_64-v1.0.0.zip` - portable Windows CLI and GUI
+- `oos-lite-linux-x86_64-v1.0.0.tar.gz` - Linux x86_64 CLI and GUI
 - `SHA256SUMS.txt` - SHA-256 checksums for all packages

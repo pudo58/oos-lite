@@ -21,6 +21,9 @@ notify = { workspace = true }
 walkdir = { workspace = true }
 glob = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 
 [dev-dependencies]
 tempfile = "3.8"

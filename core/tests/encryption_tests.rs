@@ -223,18 +223,15 @@ fn test_encrypted_tampered_segment_detected() {
     bytes[last] ^= 0xAA;
     fs::write(&seg_file, &bytes).unwrap();
 
-    // Reopen engine
-    let engine = StorageEngine::open_with_password(&store_path, password).unwrap();
-
-    // Extracting tampered file must fail (ChecksumMismatch or DecryptionFailed)
-    let out = dir.path().join("tampered_out.txt");
-    let get_res = engine.get_file("important.txt", &out);
-    assert!(get_res.is_err());
-
-    // FSCK must flag corruption
-    let report = engine.fsck().unwrap();
-    assert!(!report.is_healthy);
-    assert!(report.corrupted_chunks > 0 || !report.errors.is_empty());
+    // Recovery must reject a complete corrupt record without discarding it.
+    let error = StorageEngine::open_with_password(&store_path, password)
+        .err()
+        .expect("tampered segment must prevent opening the store");
+    assert!(matches!(
+        error,
+        oos_lite_core::OosLiteError::CorruptedSegment { .. }
+    ));
+    assert_eq!(fs::read(&seg_file).unwrap(), bytes);
 }
 
 #[test]

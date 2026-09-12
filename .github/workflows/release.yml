@@ -20,7 +20,7 @@ jobs:
         run: choco install innosetup --no-progress
 
       - name: Build optimized binaries
-        run: cargo build --release -p oos-lite --bins
+        run: cargo build --release -p oos-lite --bins --locked
 
       - name: Package portable bundle and installer
         shell: pwsh
@@ -28,7 +28,7 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Compress-Archive `
             -Path target\release\oos-lite.exe,target\release\oos-lite-gui.exe,uninstall.bat,README.md,LICENSE-MIT,LICENSE-APACHE `
-            -DestinationPath dist\oos-lite-windows-x86_64-v0.2.3.zip `
+            -DestinationPath dist\oos-lite-windows-x86_64-v1.0.0.zip `
             -Force
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\oos-lite.iss
 
@@ -36,8 +36,8 @@ jobs:
         with:
           name: windows-assets
           path: |
-            dist/OOS-Lite-Setup-v0.2.3.exe
-            dist/oos-lite-windows-x86_64-v0.2.3.zip
+            dist/OOS-Lite-Setup-v1.0.0.exe
+            dist/oos-lite-windows-x86_64-v1.0.0.zip
 
   build-linux:
     name: Build Linux asset
@@ -49,21 +49,21 @@ jobs:
       - name: Install FUSE dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libfuse3-dev pkg-config
+          sudo apt-get install -y pkg-config libfuse3-dev libwayland-dev libxkbcommon-dev libdbus-1-dev
 
       - name: Build optimized binaries
-        run: cargo build --release -p oos-lite --bins
+        run: cargo build --release -p oos-lite --bins --locked
 
       - name: Package Linux bundle
         run: |
           mkdir -p dist/package
           cp target/release/oos-lite target/release/oos-lite-gui README.md LICENSE-MIT LICENSE-APACHE dist/package/
-          tar -czf dist/oos-lite-linux-x86_64-v0.2.3.tar.gz -C dist/package .
+          tar -czf dist/oos-lite-linux-x86_64-v1.0.0.tar.gz -C dist/package .
 
       - uses: actions/upload-artifact@v4
         with:
           name: linux-assets
-          path: dist/oos-lite-linux-x86_64-v0.2.3.tar.gz
+          path: dist/oos-lite-linux-x86_64-v1.0.0.tar.gz
 
   publish:
     name: Publish GitHub release
@@ -79,17 +79,17 @@ jobs:
       - name: Generate SHA-256 checksums
         run: |
           cd dist
-          sha256sum OOS-Lite-Setup-v0.2.3.exe oos-lite-windows-x86_64-v0.2.3.zip oos-lite-linux-x86_64-v0.2.3.tar.gz > SHA256SUMS.txt
+          sha256sum OOS-Lite-Setup-v1.0.0.exe oos-lite-windows-x86_64-v1.0.0.zip oos-lite-linux-x86_64-v1.0.0.tar.gz > SHA256SUMS.txt
 
       - name: Publish release and assets
         uses: softprops/action-gh-release@v2
         with:
-          name: OOS-Lite v0.2.3 - Core Durability and Recovery Fixes
+          name: OOS-Lite v1.0.0 - Reliable Local-First Storage
           body_path: release_notes.md
           draft: false
           prerelease: false
           files: |
-            dist/OOS-Lite-Setup-v0.2.3.exe
-            dist/oos-lite-windows-x86_64-v0.2.3.zip
-            dist/oos-lite-linux-x86_64-v0.2.3.tar.gz
+            dist/OOS-Lite-Setup-v1.0.0.exe
+            dist/oos-lite-windows-x86_64-v1.0.0.zip
+            dist/oos-lite-linux-x86_64-v1.0.0.tar.gz
             dist/SHA256SUMS.txt

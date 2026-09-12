@@ -42,6 +42,70 @@ pub struct EngineStats {
     pub space_savings_pct: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileFingerprint {
+    len: u64,
+    modified: Option<(u64, u32)>,
+    identity: FileIdentity,
+}
+
+#[cfg(windows)]
+type FileIdentity = (u32, u32, u32);
+
+#[cfg(unix)]
+type FileIdentity = (u64, u64);
+
+#[cfg(not(any(windows, unix)))]
+type FileIdentity = ();
+
+impl FileFingerprint {
+    fn from_file(file: &File) -> std::io::Result<Self> {
+        let metadata = file.metadata()?;
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| (duration.as_secs(), duration.subsec_nanos()));
+
+        #[cfg(windows)]
+        let identity = windows_file_identity(file)?;
+
+        #[cfg(unix)]
+        let identity = {
+            use std::os::unix::fs::MetadataExt;
+            (metadata.dev(), metadata.ino())
+        };
+
+        #[cfg(not(any(windows, unix)))]
+        let identity = ();
+
+        Ok(Self {
+            len: metadata.len(),
+            modified,
+            identity,
+        })
+    }
+}
+
+#[cfg(windows)]
+fn windows_file_identity(file: &File) -> std::io::Result<FileIdentity> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((
+        info.dwVolumeSerialNumber,
+        info.nFileIndexHigh,
+        info.nFileIndexLow,
+    ))
+}
+
 /// Helper function to validate logical file names
 pub fn validate_logical_name(name: &str) -> Result<()> {
     let trimmed = name.trim();
@@ -483,28 +547,66 @@ impl StorageEngine {
             .read()
             .map_err(|e| OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}")))?;
 
-        let file = open_safe_read(file_path)?;
-        let reader = BufReader::new(file);
-        let mut stream_chunker = StreamChunker::new(reader);
+        const MAX_STABLE_READ_ATTEMPTS: usize = 3;
+        let mut stable_read = None;
 
-        let mut hasher = blake3::Hasher::new();
-        let mut total_bytes = 0u64;
-        let mut chunk_ids = Vec::new();
-        let mut new_chunks = 0usize;
+        for attempt in 1..=MAX_STABLE_READ_ATTEMPTS {
+            let file = open_safe_read(file_path)?;
+            let before = FileFingerprint::from_file(&file)?;
+            let reader = BufReader::new(file);
+            let mut stream_chunker = StreamChunker::new(reader);
+            let mut hasher = blake3::Hasher::new();
+            let mut total_bytes = 0u64;
+            let mut chunk_ids = Vec::new();
+            let mut new_chunks = 0usize;
 
-        while let Some(chunk) = stream_chunker.next_chunk()? {
-            total_bytes += chunk.len() as u64;
-            hasher.update(&chunk);
-            let cid = ChunkId::from_data(&chunk);
-            chunk_ids.push(cid);
-            let (_id, is_new) = self.segment_store.put_chunk(&chunk)?;
-            if is_new {
-                new_chunks += 1;
+            while let Some(chunk) = stream_chunker.next_chunk()? {
+                total_bytes += chunk.len() as u64;
+                hasher.update(&chunk);
+                let cid = ChunkId::from_data(&chunk);
+                chunk_ids.push(cid);
+                let (_id, is_new) = self.segment_store.put_chunk(&chunk)?;
+                if is_new {
+                    new_chunks += 1;
+                }
+            }
+
+            let reader = stream_chunker.into_inner();
+            let after_handle = FileFingerprint::from_file(reader.get_ref())?;
+            let current_path_file = open_safe_read(file_path)?;
+            let after_path = FileFingerprint::from_file(&current_path_file)?;
+            if before == after_handle && after_handle == after_path && total_bytes == after_path.len
+            {
+                stable_read = Some((
+                    chunk_ids,
+                    total_bytes,
+                    *hasher.finalize().as_bytes(),
+                    new_chunks,
+                ));
+                break;
+            }
+
+            warn!(
+                path = %file_path.display(),
+                attempt,
+                "File changed while it was being read; retrying from the beginning"
+            );
+            if attempt < MAX_STABLE_READ_ATTEMPTS {
+                std::thread::sleep(std::time::Duration::from_millis(25));
             }
         }
+
+        let (chunk_ids, total_bytes, content_hash, new_chunks) = stable_read.ok_or_else(|| {
+            OosLiteError::Io(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                format!(
+                    "File changed during all {MAX_STABLE_READ_ATTEMPTS} read attempts: {}",
+                    file_path.display()
+                ),
+            ))
+        })?;
         self.segment_store.sync()?;
 
-        let content_hash = *hasher.finalize().as_bytes();
         let manifest = Manifest::new(chunk_ids.clone(), total_bytes, content_hash);
 
         // Determine ObjectId & version target
@@ -958,10 +1060,7 @@ impl StorageEngine {
         let total_chunks = self.segment_store.chunk_count();
         let unique_chunks_bytes = self.segment_store.unique_raw_bytes();
 
-        let seg_disk = self.segment_store.physical_disk_bytes().unwrap_or(0);
-        let meta_disk = dir_size(&self.root_dir.join("metadata.db"));
-        let wal_disk = dir_size(&self.root_dir.join("wal"));
-        let physical_disk_bytes = seg_disk + meta_disk + wal_disk;
+        let physical_disk_bytes = dir_size(&self.root_dir);
 
         let dedup_ratio = if unique_chunks_bytes > 0 {
             logical_bytes as f64 / unique_chunks_bytes as f64
@@ -1084,6 +1183,50 @@ impl StorageEngine {
             .map_err(|e| OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}")))?;
 
         GarbageCollector::collect(&self.segment_store, &self.metadata_store)
+    }
+
+    /// Applies a watcher subtree move/unbind while preserving every ObjectRecord.
+    pub(crate) fn update_watched_prefix(
+        &self,
+        watch_root: &str,
+        from: &str,
+        to: Option<&str>,
+        include: impl Fn(&str) -> bool,
+    ) -> Result<Vec<(String, Option<String>)>> {
+        let _put_guard = self.put_lock.lock().map_err(|e| {
+            OosLiteError::Internal(format!("StorageEngine put_lock poisoned: {e}"))
+        })?;
+        let _op_guard = self.op_lock.write().map_err(|e| {
+            OosLiteError::Internal(format!("StorageEngine op_lock poisoned: {e}"))
+        })?;
+        let tracked: std::collections::HashSet<_> = self.metadata_store
+            .list_watcher_files(watch_root)?.into_iter().collect();
+        let mut changes = Vec::new();
+        for (name, _, _) in self.metadata_store.list_named_objects()? {
+            let suffix = if from.is_empty() {
+                name.as_str()
+            } else if name == from {
+                ""
+            } else if let Some(suffix) = name.strip_prefix(from).and_then(|s| s.strip_prefix('/')) {
+                suffix
+            } else {
+                continue;
+            };
+            if to.is_none() && !tracked.contains(&name) {
+                continue;
+            }
+            let target = to.map(|prefix| {
+                if suffix.is_empty() { prefix.to_string() }
+                else if prefix.is_empty() { suffix.to_string() }
+                else { format!("{prefix}/{suffix}") }
+            }).filter(|target| include(target));
+            if let Some(ref target) = target {
+                validate_logical_name(target)?;
+            }
+            changes.push((name, target));
+        }
+        self.metadata_store.update_watcher_bindings(watch_root, &changes)?;
+        Ok(changes)
     }
 
     /// Renames a logical file binding, preserving the underlying ObjectId and its full version history.
