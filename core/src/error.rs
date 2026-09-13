@@ -8,6 +8,9 @@ pub enum OosLiteError {
     #[error("Database error: {0}")]
     Database(#[from] sled::Error),
 
+    #[error("Metadata database error: {0}")]
+    Redb(String),
+
     #[error("Checksum mismatch for chunk {chunk_id}: expected {expected:08x}, got {actual:08x}")]
     ChecksumMismatch {
         chunk_id: String,
@@ -26,10 +29,7 @@ pub enum OosLiteError {
     },
 
     #[error("Corrupted segment at offset {offset}: {reason}")]
-    CorruptedSegment {
-        offset: u64,
-        reason: String,
-    },
+    CorruptedSegment { offset: u64, reason: String },
 
     #[error("Object not found: {0}")]
     ObjectNotFound(String),

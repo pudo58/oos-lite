@@ -30,19 +30,24 @@ impl GarbageCollector {
         let mut live_roots = 0;
 
         // Unbound objects still own their history until explicitly deleted or pruned.
-        for record in metadata_store.all_objects() {
-            let record = record?;
+        metadata_store.visit_objects(|record| {
             live_roots += 1;
             for version in &record.versions {
                 reachable_manifests.insert(version.manifest_id.clone());
-                let manifest = metadata_store.get_manifest(&version.manifest_id)?.ok_or_else(|| {
-                    OosLiteError::Internal(format!("Object {} references missing manifest {}", record.object_id, version.manifest_id))
-                })?;
+                let manifest = metadata_store
+                    .get_manifest(&version.manifest_id)?
+                    .ok_or_else(|| {
+                        OosLiteError::Internal(format!(
+                            "Object {} references missing manifest {}",
+                            record.object_id, version.manifest_id
+                        ))
+                    })?;
                 for cid in manifest.chunks {
                     reachable_chunks.insert(cid);
                 }
             }
-        }
+            Ok(())
+        })?;
 
         // 2. Scan Snapshots (all historical references preserved by snapshots)
         let snapshots = metadata_store.list_snapshots()?;
@@ -50,9 +55,14 @@ impl GarbageCollector {
             live_roots += 1;
             for entry in snap.entries {
                 reachable_manifests.insert(entry.manifest_id.clone());
-                let manifest = metadata_store.get_manifest(&entry.manifest_id)?.ok_or_else(|| {
-                    OosLiteError::Internal(format!("Snapshot {} references missing manifest {}", snap.label, entry.manifest_id))
-                })?;
+                let manifest = metadata_store
+                    .get_manifest(&entry.manifest_id)?
+                    .ok_or_else(|| {
+                        OosLiteError::Internal(format!(
+                            "Snapshot {} references missing manifest {}",
+                            snap.label, entry.manifest_id
+                        ))
+                    })?;
                 for cid in manifest.chunks {
                     reachable_chunks.insert(cid);
                 }

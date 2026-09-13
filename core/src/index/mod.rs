@@ -1,239 +1,341 @@
-//! Name index (path -> ObjectID) and Object index (ObjectID -> manifest) powered by sled.
+//! Name, object, manifest, snapshot, and watcher metadata stored in redb.
+//!
+//! Existing sled metadata is migrated through staging, with a durable publication
+//! marker and a persistent sled configuration blocker preventing downgrade access.
 
-use sled::{Db, Transactional, Tree};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
+use std::fmt::Display;
 use std::path::Path;
 use tracing::info;
 
 use crate::error::{OosLiteError, Result};
 use crate::manifest::Manifest;
 use crate::object::{ObjectId, ObjectRecord};
-
 use crate::snapshot::Snapshot;
 
+type BytesTable<'a> = redb::Table<'a, &'static [u8], &'static [u8]>;
+
+const NAME_INDEX: TableDefinition<&'static [u8], &'static [u8]> =
+    TableDefinition::new("name_index");
+const OBJECT_INDEX: TableDefinition<&'static [u8], &'static [u8]> =
+    TableDefinition::new("object_index");
+const MANIFESTS: TableDefinition<&'static [u8], &'static [u8]> = TableDefinition::new("manifests");
+const SNAPSHOTS: TableDefinition<&'static [u8], &'static [u8]> = TableDefinition::new("snapshots");
+const WATCHER_FILES: TableDefinition<&'static [u8], &'static [u8]> =
+    TableDefinition::new("watcher_files");
+const WATCHER_CONFIG: TableDefinition<&'static [u8], &'static [u8]> =
+    TableDefinition::new("watcher_config");
+const MIGRATION_MARKER: &[u8] = b"__oos_lite_metadata_backend";
+const MIGRATION_VERSION: &[u8] = b"redb-v1";
+
+fn redb_error(error: impl Display) -> OosLiteError {
+    OosLiteError::Redb(error.to_string())
+}
+
+mod migration;
+
 pub struct MetadataStore {
-    db: Db,
-    tree_names: Tree,
-    tree_objects: Tree,
-    tree_manifests: Tree,
-    tree_snapshots: Tree,
-    tree_watcher_files: Tree,
-    tree_watcher_config: Tree,
+    db: Database,
+    _migration_lock: std::fs::File,
 }
 
 impl MetadataStore {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let db_path = path.as_ref();
-        let db = sled::open(db_path)?;
-
-        let tree_names = db.open_tree("name_index")?;
-        let tree_objects = db.open_tree("object_index")?;
-        let tree_manifests = db.open_tree("manifests")?;
-        let tree_snapshots = db.open_tree("snapshots")?;
-        let tree_watcher_files = db.open_tree("watcher_files")?;
-        let tree_watcher_config = db.open_tree("watcher_config")?;
-
-        info!("MetadataStore opened at: {}", db_path.display());
-
+        let (db, lock) = migration::open(path.as_ref())?;
+        info!("MetadataStore opened at: {}", path.as_ref().display());
         Ok(Self {
             db,
-            tree_names,
-            tree_objects,
-            tree_manifests,
-            tree_snapshots,
-            tree_watcher_files,
-            tree_watcher_config,
+            _migration_lock: lock,
         })
     }
 
-    /// Resolves a user-provided file name / path string to its persistent ObjectId.
+    fn validate_database(db: &Database) -> Result<()> {
+        let read_txn = db.begin_read().map_err(redb_error)?;
+        read_txn.open_table(NAME_INDEX).map_err(redb_error)?;
+        read_txn.open_table(OBJECT_INDEX).map_err(redb_error)?;
+        read_txn.open_table(MANIFESTS).map_err(redb_error)?;
+        read_txn.open_table(SNAPSHOTS).map_err(redb_error)?;
+        read_txn.open_table(WATCHER_FILES).map_err(redb_error)?;
+        let config = read_txn.open_table(WATCHER_CONFIG).map_err(redb_error)?;
+        match config.get(MIGRATION_MARKER).map_err(redb_error)? {
+            Some(value) if value.value() == MIGRATION_VERSION => Ok(()),
+            Some(value) => Err(OosLiteError::Internal(format!(
+                "Unsupported metadata backend version: {}",
+                String::from_utf8_lossy(value.value())
+            ))),
+            None => Err(OosLiteError::Internal(
+                "Metadata database has no migration marker; refusing to overwrite it".to_string(),
+            )),
+        }
+    }
+
+    fn initialize_database(db: &Database, legacy: Option<&sled::Db>) -> Result<()> {
+        let write_txn = db.begin_write().map_err(redb_error)?;
+        {
+            let mut names = write_txn.open_table(NAME_INDEX).map_err(redb_error)?;
+            let mut objects = write_txn.open_table(OBJECT_INDEX).map_err(redb_error)?;
+            let mut manifests = write_txn.open_table(MANIFESTS).map_err(redb_error)?;
+            let mut snapshots = write_txn.open_table(SNAPSHOTS).map_err(redb_error)?;
+            let mut watcher_files = write_txn.open_table(WATCHER_FILES).map_err(redb_error)?;
+            let mut watcher_config = write_txn.open_table(WATCHER_CONFIG).map_err(redb_error)?;
+            if let Some(legacy) = legacy {
+                copy_legacy_tree(&legacy.open_tree("name_index")?, &mut names)?;
+                copy_legacy_tree(&legacy.open_tree("object_index")?, &mut objects)?;
+                copy_legacy_tree(&legacy.open_tree("manifests")?, &mut manifests)?;
+                copy_legacy_tree(&legacy.open_tree("snapshots")?, &mut snapshots)?;
+                copy_legacy_tree(&legacy.open_tree("watcher_files")?, &mut watcher_files)?;
+                copy_legacy_tree(&legacy.open_tree("watcher_config")?, &mut watcher_config)?;
+            }
+            watcher_config
+                .insert(MIGRATION_MARKER, MIGRATION_VERSION)
+                .map_err(redb_error)?;
+        }
+        write_txn.commit().map_err(redb_error)?;
+        Ok(())
+    }
+
+    fn read_value(
+        &self,
+        definition: TableDefinition<&'static [u8], &'static [u8]>,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        let read_txn = self.db.begin_read().map_err(redb_error)?;
+        let table = read_txn.open_table(definition).map_err(redb_error)?;
+        let value = table
+            .get(key)
+            .map_err(redb_error)?
+            .map(|value| value.value().to_vec());
+        Ok(value)
+    }
+
+    fn write_value(
+        &self,
+        definition: TableDefinition<&'static [u8], &'static [u8]>,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<()> {
+        let write_txn = self.db.begin_write().map_err(redb_error)?;
+        {
+            let mut table = write_txn.open_table(definition).map_err(redb_error)?;
+            table.insert(key, value).map_err(redb_error)?;
+        }
+        write_txn.commit().map_err(redb_error)?;
+        Ok(())
+    }
+
+    fn remove_value(
+        &self,
+        definition: TableDefinition<&'static [u8], &'static [u8]>,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        let write_txn = self.db.begin_write().map_err(redb_error)?;
+        let previous = {
+            let mut table = write_txn.open_table(definition).map_err(redb_error)?;
+            let previous = table.remove(key).map_err(redb_error)?;
+            previous.map(|value| value.value().to_vec())
+        };
+        write_txn.commit().map_err(redb_error)?;
+        Ok(previous)
+    }
+
     pub fn resolve_name(&self, name: &str) -> Result<Option<ObjectId>> {
-        if let Some(ivec) = self.tree_names.get(name.as_bytes())? {
-            if ivec.len() == 16 {
-                let mut bytes = [0u8; 16];
-                bytes.copy_from_slice(&ivec);
-                return Ok(Some(ObjectId::from_raw(bytes)));
-            }
+        let Some(value) = self.read_value(NAME_INDEX, name.as_bytes())? else {
+            return Ok(None);
+        };
+        if value.len() == 16 {
+            let mut bytes = [0u8; 16];
+            bytes.copy_from_slice(&value);
+            return Ok(Some(ObjectId::from_raw(bytes)));
         }
         Ok(None)
     }
 
-    /// Associates a user name with an ObjectId.
     pub fn bind_name(&self, name: &str, id: &ObjectId) -> Result<()> {
-        self.tree_names
-            .insert(name.as_bytes(), id.as_bytes().as_slice())?;
-        Ok(())
+        self.write_value(NAME_INDEX, name.as_bytes(), id.as_bytes().as_slice())
     }
 
-    /// Removes a name binding from name_index, returning the previously associated ObjectId.
     pub fn unbind_name(&self, name: &str) -> Result<Option<ObjectId>> {
-        if let Some(ivec) = self.tree_names.remove(name.as_bytes())? {
-            if ivec.len() == 16 {
-                let mut bytes = [0u8; 16];
-                bytes.copy_from_slice(&ivec);
-                return Ok(Some(ObjectId::from_raw(bytes)));
-            }
+        let Some(value) = self.remove_value(NAME_INDEX, name.as_bytes())? else {
+            return Ok(None);
+        };
+        if value.len() == 16 {
+            let mut bytes = [0u8; 16];
+            bytes.copy_from_slice(&value);
+            return Ok(Some(ObjectId::from_raw(bytes)));
         }
         Ok(None)
     }
 
-    /// Atomically renames a logical name binding in a single transaction, preserving the ObjectId.
     pub fn rename_name_binding(&self, old_name: &str, new_name: &str) -> Result<bool> {
-        use sled::transaction::TransactionResult;
-        let res: TransactionResult<bool, OosLiteError> = self.tree_names.transaction(|names| {
-            if let Some(ivec) = names.remove(old_name.as_bytes())? {
-                names.insert(new_name.as_bytes(), ivec)?;
-                Ok(true)
+        let write_txn = self.db.begin_write().map_err(redb_error)?;
+        let moved = {
+            let mut names = write_txn.open_table(NAME_INDEX).map_err(redb_error)?;
+            let previous = names
+                .remove(old_name.as_bytes())
+                .map_err(redb_error)?
+                .map(|value| value.value().to_vec());
+            if let Some(bytes) = previous {
+                names
+                    .insert(new_name.as_bytes(), bytes.as_slice())
+                    .map_err(redb_error)?;
+                true
             } else {
-                Ok(false)
+                false
             }
-        });
-
-        match res {
-            Ok(b) => Ok(b),
-            Err(sled::transaction::TransactionError::Abort(e)) => Err(e),
-            Err(sled::transaction::TransactionError::Storage(e)) => Err(OosLiteError::Database(e)),
-        }
+        };
+        write_txn.commit().map_err(redb_error)?;
+        Ok(moved)
     }
 
-    /// Atomically unbinds name and deletes associated object record in a single transaction.
     pub fn delete_named_object(&self, name: &str) -> Result<Option<ObjectId>> {
-        use sled::transaction::TransactionResult;
-        let res: TransactionResult<Option<ObjectId>, OosLiteError> =
-            (&self.tree_names, &self.tree_objects).transaction(|(names, objects)| {
-                if let Some(ivec) = names.remove(name.as_bytes())? {
-                    if ivec.len() == 16 {
-                        let mut bytes = [0u8; 16];
-                        bytes.copy_from_slice(&ivec);
-                        objects.remove(bytes.as_slice())?;
-                        return Ok(Some(ObjectId::from_raw(bytes)));
-                    }
+        let write_txn = self.db.begin_write().map_err(redb_error)?;
+        let removed = {
+            let mut names = write_txn.open_table(NAME_INDEX).map_err(redb_error)?;
+            let mut objects = write_txn.open_table(OBJECT_INDEX).map_err(redb_error)?;
+            let previous = names.remove(name.as_bytes()).map_err(redb_error)?;
+            if let Some(value) = previous {
+                let bytes = value.value().to_vec();
+                drop(value);
+                if bytes.len() == 16 {
+                    let mut object_id = [0u8; 16];
+                    object_id.copy_from_slice(&bytes);
+                    objects.remove(object_id.as_slice()).map_err(redb_error)?;
+                    Some(ObjectId::from_raw(object_id))
+                } else {
+                    None
                 }
-                Ok(None)
-            });
-
-        match res {
-            Ok(opt) => Ok(opt),
-            Err(sled::transaction::TransactionError::Abort(e)) => Err(e),
-            Err(sled::transaction::TransactionError::Storage(e)) => Err(OosLiteError::Database(e)),
-        }
+            } else {
+                None
+            }
+        };
+        write_txn.commit().map_err(redb_error)?;
+        Ok(removed)
     }
 
-    /// Removes an ObjectRecord from object_index.
     pub fn delete_object(&self, id: &ObjectId) -> Result<()> {
-        self.tree_objects.remove(id.as_bytes().as_slice())?;
+        self.remove_value(OBJECT_INDEX, id.as_bytes().as_slice())?;
         Ok(())
     }
 
-    /// Removes a Manifest from manifests tree.
     pub fn delete_manifest(&self, manifest_id: &str) -> Result<()> {
-        self.tree_manifests.remove(manifest_id.as_bytes())?;
+        self.remove_value(MANIFESTS, manifest_id.as_bytes())?;
         Ok(())
     }
 
-    /// Lists all manifest IDs currently stored.
     pub fn list_all_manifest_ids(&self) -> Result<Vec<String>> {
+        let read_txn = self.db.begin_read().map_err(redb_error)?;
+        let table = read_txn.open_table(MANIFESTS).map_err(redb_error)?;
         let mut list = Vec::new();
-        for item in self.tree_manifests.iter() {
-            let (k, _) = item?;
-            list.push(String::from_utf8_lossy(&k).to_string());
+        for item in table.iter().map_err(redb_error)? {
+            let (key, _) = item.map_err(redb_error)?;
+            list.push(String::from_utf8_lossy(key.value()).to_string());
         }
         Ok(list)
     }
 
-    /// Deletes a snapshot by label.
     pub fn delete_snapshot(&self, label: &str) -> Result<bool> {
-        let removed = self.tree_snapshots.remove(label.as_bytes())?;
-        Ok(removed.is_some())
+        Ok(self.remove_value(SNAPSHOTS, label.as_bytes())?.is_some())
     }
 
-    /// Retrieves the full ObjectRecord (including complete version history) by ObjectId.
     pub fn get_object(&self, id: &ObjectId) -> Result<Option<ObjectRecord>> {
-        if let Some(ivec) = self.tree_objects.get(id.as_bytes().as_slice())? {
-            let record = ObjectRecord::from_bytes(&ivec)?;
-            return Ok(Some(record));
+        let Some(value) = self.read_value(OBJECT_INDEX, id.as_bytes().as_slice())? else {
+            return Ok(None);
+        };
+        Ok(Some(ObjectRecord::from_bytes(&value)?))
+    }
+
+    pub(crate) fn visit_objects(
+        &self,
+        mut visitor: impl FnMut(ObjectRecord) -> Result<()>,
+    ) -> Result<()> {
+        let read_txn = self.db.begin_read().map_err(redb_error)?;
+        let table = read_txn.open_table(OBJECT_INDEX).map_err(redb_error)?;
+        for item in table.iter().map_err(redb_error)? {
+            let (_, value) = item.map_err(redb_error)?;
+            visitor(ObjectRecord::from_bytes(value.value())?)?;
         }
-        Ok(None)
+        Ok(())
     }
 
-    pub(crate) fn all_objects(&self) -> impl Iterator<Item = Result<ObjectRecord>> + '_ {
-        self.tree_objects.iter().map(|item| {
-            let (_, bytes) = item?;
-            ObjectRecord::from_bytes(&bytes)
-        })
-    }
-
-    // The engine holds its namespace write lock while constructing and applying this batch.
     pub(crate) fn update_watcher_bindings(
         &self,
         watch_root: &str,
         changes: &[(String, Option<String>)],
     ) -> Result<usize> {
-        use sled::transaction::TransactionResult;
-        let result: TransactionResult<usize, OosLiteError> =
-            (&self.tree_names, &self.tree_watcher_files).transaction(|(names, tracked)| {
-                let mut moved = Vec::new();
-                for (old, new) in changes {
-                    let id = names.remove(old.as_bytes())?;
-                    tracked.remove(Self::watcher_file_key(watch_root, old))?;
-                    if let Some(id) = id {
-                        moved.push((new, id));
-                    }
+        let write_txn = self.db.begin_write().map_err(redb_error)?;
+        let count = {
+            let mut names = write_txn.open_table(NAME_INDEX).map_err(redb_error)?;
+            let mut tracked = write_txn.open_table(WATCHER_FILES).map_err(redb_error)?;
+            let mut moved = Vec::new();
+            for (old, new) in changes {
+                let id = names.remove(old.as_bytes()).map_err(redb_error)?;
+                let old_key = Self::watcher_file_key(watch_root, old);
+                tracked.remove(old_key.as_slice()).map_err(redb_error)?;
+                if let Some(id) = id {
+                    moved.push((new, id.value().to_vec()));
                 }
-                for (new, id) in &moved {
-                    if let Some(new) = new {
-                        names.insert(new.as_bytes(), id.clone())?;
-                        tracked.insert(Self::watcher_file_key(watch_root, new), &[])?;
-                    }
+            }
+            for (new, id) in &moved {
+                if let Some(new) = new {
+                    names
+                        .insert(new.as_bytes(), id.as_slice())
+                        .map_err(redb_error)?;
+                    let new_key = Self::watcher_file_key(watch_root, new);
+                    tracked
+                        .insert(new_key.as_slice(), &[] as &[u8])
+                        .map_err(redb_error)?;
                 }
-                Ok(moved.len())
-            });
-        let count = match result {
-            Ok(count) => count,
-            Err(sled::transaction::TransactionError::Abort(e)) => return Err(e),
-            Err(sled::transaction::TransactionError::Storage(e)) => return Err(e.into()),
+            }
+            moved.len()
         };
-        self.flush()?;
+        write_txn.commit().map_err(redb_error)?;
         Ok(count)
     }
 
-    /// Saves or updates an ObjectRecord in the object_index tree.
     pub fn put_object(&self, record: &ObjectRecord) -> Result<()> {
-        let bytes = record.to_bytes();
-        self.tree_objects
-            .insert(record.object_id.as_bytes().as_slice(), bytes)?;
-        Ok(())
+        self.write_value(
+            OBJECT_INDEX,
+            record.object_id.as_bytes().as_slice(),
+            &record.to_bytes(),
+        )
     }
 
-    /// Stores a Manifest into the manifests sled tree, keyed by its content ID.
     pub fn save_manifest(&self, manifest: &Manifest) -> Result<String> {
         let id = manifest.content_id();
-        let bytes = manifest.to_bytes();
-        self.tree_manifests.insert(id.as_bytes(), bytes)?;
+        self.write_value(MANIFESTS, id.as_bytes(), &manifest.to_bytes())?;
         Ok(id)
     }
 
-    /// Loads a Manifest from the manifests sled tree.
     pub fn get_manifest(&self, manifest_id: &str) -> Result<Option<Manifest>> {
-        if let Some(ivec) = self.tree_manifests.get(manifest_id.as_bytes())? {
-            let manifest = Manifest::from_bytes(&ivec)?;
-            return Ok(Some(manifest));
-        }
-        Ok(None)
+        let Some(value) = self.read_value(MANIFESTS, manifest_id.as_bytes())? else {
+            return Ok(None);
+        };
+        Ok(Some(Manifest::from_bytes(&value)?))
     }
 
-    /// Lists all entries currently registered in the name index along with their latest ObjectRecord.
     pub fn list_named_objects(&self) -> Result<Vec<(String, ObjectId, ObjectRecord)>> {
-        let mut result = Vec::new();
-        for item in self.tree_names.iter() {
-            let (k, v) = item?;
-            let name = String::from_utf8_lossy(&k).to_string();
-            if v.len() == 16 {
-                let mut bytes = [0u8; 16];
-                bytes.copy_from_slice(&v);
-                let id = ObjectId::from_raw(bytes);
-                if let Some(record) = self.get_object(&id)? {
-                    result.push((name, id, record));
+        let entries = {
+            let read_txn = self.db.begin_read().map_err(redb_error)?;
+            let table = read_txn.open_table(NAME_INDEX).map_err(redb_error)?;
+            let mut entries = Vec::new();
+            for item in table.iter().map_err(redb_error)? {
+                let (key, value) = item.map_err(redb_error)?;
+                if value.value().len() == 16 {
+                    let mut bytes = [0u8; 16];
+                    bytes.copy_from_slice(value.value());
+                    entries.push((
+                        String::from_utf8_lossy(key.value()).to_string(),
+                        ObjectId::from_raw(bytes),
+                    ));
                 }
+            }
+            entries
+        };
+
+        let mut result = Vec::new();
+        for (name, id) in entries {
+            if let Some(record) = self.get_object(&id)? {
+                result.push((name, id, record));
             }
         }
         Ok(result)
@@ -252,22 +354,32 @@ impl MetadataStore {
     }
 
     pub fn mark_watcher_file(&self, watch_root: &str, logical_name: &str) -> Result<()> {
-        self.tree_watcher_files
-            .insert(Self::watcher_file_key(watch_root, logical_name), &[])?;
-        Ok(())
+        self.write_value(
+            WATCHER_FILES,
+            &Self::watcher_file_key(watch_root, logical_name),
+            &[],
+        )
     }
 
     pub fn unmark_watcher_file(&self, watch_root: &str, logical_name: &str) -> Result<()> {
-        self.tree_watcher_files
-            .remove(Self::watcher_file_key(watch_root, logical_name))?;
+        self.remove_value(
+            WATCHER_FILES,
+            &Self::watcher_file_key(watch_root, logical_name),
+        )?;
         Ok(())
     }
 
     pub fn list_watcher_files(&self, watch_root: &str) -> Result<Vec<String>> {
         let prefix = Self::watcher_file_prefix(watch_root);
+        let read_txn = self.db.begin_read().map_err(redb_error)?;
+        let table = read_txn.open_table(WATCHER_FILES).map_err(redb_error)?;
         let mut files = Vec::new();
-        for item in self.tree_watcher_files.scan_prefix(&prefix) {
-            let (key, _) = item?;
+        for item in table.range(prefix.as_slice()..).map_err(redb_error)? {
+            let (key, _) = item.map_err(redb_error)?;
+            let key = key.value();
+            if !key.starts_with(&prefix) {
+                break;
+            }
             files.push(String::from_utf8_lossy(&key[prefix.len()..]).to_string());
         }
         Ok(files)
@@ -280,23 +392,32 @@ impl MetadataStore {
         cooldown_secs: u64,
         throttle_ms: u64,
     ) -> Result<()> {
-        self.tree_watcher_config
-            .insert("watch_dir", watch_dir.as_bytes())?;
-        self.tree_watcher_config
-            .insert("debounce_secs", &debounce_secs.to_le_bytes())?;
-        self.tree_watcher_config
-            .insert("cooldown_secs", &cooldown_secs.to_le_bytes())?;
-        self.tree_watcher_config
-            .insert("throttle_ms", &throttle_ms.to_le_bytes())?;
-        self.flush()
+        let write_txn = self.db.begin_write().map_err(redb_error)?;
+        {
+            let mut table = write_txn.open_table(WATCHER_CONFIG).map_err(redb_error)?;
+            table
+                .insert(&b"watch_dir"[..], watch_dir.as_bytes())
+                .map_err(redb_error)?;
+            table
+                .insert(&b"debounce_secs"[..], &debounce_secs.to_le_bytes()[..])
+                .map_err(redb_error)?;
+            table
+                .insert(&b"cooldown_secs"[..], &cooldown_secs.to_le_bytes()[..])
+                .map_err(redb_error)?;
+            table
+                .insert(&b"throttle_ms"[..], &throttle_ms.to_le_bytes()[..])
+                .map_err(redb_error)?;
+        }
+        write_txn.commit().map_err(redb_error)?;
+        Ok(())
     }
 
     pub fn load_watcher_config(&self) -> Result<Option<(String, u64, u64, u64)>> {
-        let Some(dir) = self.tree_watcher_config.get("watch_dir")? else {
+        let Some(dir) = self.read_value(WATCHER_CONFIG, b"watch_dir")? else {
             return Ok(None);
         };
-        let read_u64 = |key: &str, default: u64| -> Result<u64> {
-            let Some(value) = self.tree_watcher_config.get(key)? else {
+        let read_u64 = |key: &[u8], default: u64| -> Result<u64> {
+            let Some(value) = self.read_value(WATCHER_CONFIG, key)? else {
                 return Ok(default);
             };
             if value.len() != 8 {
@@ -308,51 +429,76 @@ impl MetadataStore {
         };
         Ok(Some((
             String::from_utf8_lossy(&dir).to_string(),
-            read_u64("debounce_secs", 3)?,
-            read_u64("cooldown_secs", 60)?,
-            read_u64("throttle_ms", 10)?,
+            read_u64(b"debounce_secs", 3)?,
+            read_u64(b"cooldown_secs", 60)?,
+            read_u64(b"throttle_ms", 10)?,
         )))
     }
 
     pub fn save_snapshot(&self, snapshot: &Snapshot) -> Result<()> {
-        let bytes = snapshot.to_bytes();
-        self.tree_snapshots
-            .insert(snapshot.label.as_bytes(), bytes)?;
-        Ok(())
+        self.write_value(SNAPSHOTS, snapshot.label.as_bytes(), &snapshot.to_bytes())
     }
 
     pub fn get_snapshot(&self, label: &str) -> Result<Option<Snapshot>> {
-        if let Some(ivec) = self.tree_snapshots.get(label.as_bytes())? {
-            let snap = Snapshot::from_bytes(&ivec)?;
-            return Ok(Some(snap));
-        }
-        Ok(None)
+        let Some(value) = self.read_value(SNAPSHOTS, label.as_bytes())? else {
+            return Ok(None);
+        };
+        Ok(Some(Snapshot::from_bytes(&value)?))
     }
 
     pub fn list_snapshots(&self) -> Result<Vec<Snapshot>> {
+        let read_txn = self.db.begin_read().map_err(redb_error)?;
+        let table = read_txn.open_table(SNAPSHOTS).map_err(redb_error)?;
         let mut results = Vec::new();
-        for item in self.tree_snapshots.iter() {
-            let (_k, v) = item?;
-            let snap = Snapshot::from_bytes(&v)?;
-            results.push(snap);
+        for item in table.iter().map_err(redb_error)? {
+            let (_, value) = item.map_err(redb_error)?;
+            results.push(Snapshot::from_bytes(value.value())?);
         }
-        // Sort by created_at ascending
-        results.sort_by_key(|s| s.created_at);
+        results.sort_by_key(|snapshot| snapshot.created_at);
         Ok(results)
     }
 
     pub fn count_snapshots(&self) -> usize {
-        self.tree_snapshots.len()
+        self.table_len(SNAPSHOTS)
     }
 
     pub fn count_manifests(&self) -> usize {
-        self.tree_manifests.len()
+        self.table_len(MANIFESTS)
     }
 
+    fn table_len(&self, definition: TableDefinition<&'static [u8], &'static [u8]>) -> usize {
+        let Ok(read_txn) = self.db.begin_read() else {
+            return 0;
+        };
+        let Ok(table) = read_txn.open_table(definition) else {
+            return 0;
+        };
+        table
+            .len()
+            .ok()
+            .and_then(|len| usize::try_from(len).ok())
+            .unwrap_or(0)
+    }
+
+    /// redb commits are durable by default, so this compatibility method is intentionally a no-op.
     pub fn flush(&self) -> Result<()> {
-        self.db.flush()?;
         Ok(())
     }
+
+    #[cfg(test)]
+    fn overwrite_manifest_bytes_for_test(&self, manifest_id: &str, bytes: &[u8]) -> Result<()> {
+        self.write_value(MANIFESTS, manifest_id.as_bytes(), bytes)
+    }
+}
+
+fn copy_legacy_tree(legacy: &sled::Tree, target: &mut BytesTable<'_>) -> Result<()> {
+    for item in legacy.iter() {
+        let (key, value) = item?;
+        target
+            .insert(key.as_ref(), value.as_ref())
+            .map_err(redb_error)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -378,14 +524,28 @@ mod tests {
             let orphan = engine.put_file_named("orphan", &source).unwrap();
             engine.delete_file("orphan").unwrap();
             let metadata = engine.metadata_store();
-            let mut bytes = metadata.tree_manifests.get(root.manifest_id.as_bytes()).unwrap().unwrap().to_vec();
+            let mut bytes = metadata
+                .read_value(MANIFESTS, root.manifest_id.as_bytes())
+                .unwrap()
+                .unwrap();
             bytes[16] ^= 0xff;
-            metadata.tree_manifests.insert(root.manifest_id.as_bytes(), bytes.clone()).unwrap();
+            metadata
+                .overwrite_manifest_bytes_for_test(&root.manifest_id, &bytes)
+                .unwrap();
             let count = engine.segment_store().chunk_count();
             assert!(engine.gc().is_err());
             assert_eq!(engine.segment_store().chunk_count(), count);
-            assert!(metadata.get_manifest(&orphan.manifest_id).unwrap().is_some());
-            assert_eq!(metadata.tree_manifests.get(root.manifest_id.as_bytes()).unwrap().unwrap().as_ref(), bytes);
+            assert!(metadata
+                .get_manifest(&orphan.manifest_id)
+                .unwrap()
+                .is_some());
+            assert_eq!(
+                metadata
+                    .read_value(MANIFESTS, root.manifest_id.as_bytes())
+                    .unwrap()
+                    .unwrap(),
+                bytes
+            );
         }
     }
 
@@ -393,22 +553,17 @@ mod tests {
     fn test_name_and_object_index_workflow() {
         let dir = tempdir().expect("tempdir failed");
         let store = MetadataStore::open(dir.path()).expect("store open failed");
-
         let name = "backup/file.txt";
         assert!(store.resolve_name(name).unwrap().is_none());
 
-        // Create object v1
         let obj_id = ObjectId::generate();
         let mut record = ObjectRecord::new(obj_id, "manifest_v1_hash".to_string(), 512);
-
         store.bind_name(name, &obj_id).unwrap();
         store.put_object(&record).unwrap();
         store.flush().unwrap();
 
-        // Check resolve
         let resolved_id = store.resolve_name(name).unwrap().expect("should resolve");
         assert_eq!(resolved_id, obj_id);
-
         let loaded = store
             .get_object(&resolved_id)
             .unwrap()
@@ -416,20 +571,17 @@ mod tests {
         assert_eq!(loaded.latest_version, 1);
         assert_eq!(loaded.latest_manifest_id(), "manifest_v1_hash");
 
-        // Add version 2
         record.add_version("manifest_v2_hash".to_string(), 1024);
         store.put_object(&record).unwrap();
         store.flush().unwrap();
-
-        // Reload store across restart
         drop(store);
+
         let store2 = MetadataStore::open(dir.path()).expect("store re-open failed");
         let resolved2 = store2
             .resolve_name(name)
             .unwrap()
             .expect("should resolve after restart");
         assert_eq!(resolved2, obj_id);
-
         let loaded2 = store2
             .get_object(&resolved2)
             .unwrap()
@@ -445,7 +597,6 @@ mod tests {
     fn test_watcher_state_survives_restart_and_preserves_zero_throttle() {
         let dir = tempdir().expect("tempdir failed");
         let store = MetadataStore::open(dir.path()).expect("store open failed");
-
         store.mark_watcher_file("root-a", "docs/a.txt").unwrap();
         store.mark_watcher_file("root-a", "docs/b.txt").unwrap();
         store.mark_watcher_file("root-b", "other.txt").unwrap();
@@ -467,7 +618,6 @@ mod tests {
             reopened.load_watcher_config().unwrap(),
             Some(("C:\\Users\\Example\\Documents".to_string(), 3, 60, 0))
         );
-
         reopened
             .unmark_watcher_file("root-a", "docs/a.txt")
             .unwrap();
@@ -475,5 +625,110 @@ mod tests {
             reopened.list_watcher_files("root-a").unwrap(),
             vec!["docs/b.txt".to_string()]
         );
+    }
+
+    #[test]
+    fn migrates_existing_sled_metadata_once() {
+        let dir = tempdir().unwrap();
+        let object_id = ObjectId::generate();
+        let legacy = sled::open(dir.path()).unwrap();
+        legacy
+            .open_tree("name_index")
+            .unwrap()
+            .insert(b"legacy.txt", object_id.as_bytes().as_slice())
+            .unwrap();
+        drop(legacy);
+
+        let store = MetadataStore::open(dir.path()).unwrap();
+        assert_eq!(store.resolve_name("legacy.txt").unwrap(), Some(object_id));
+        assert!(dir.path().join("metadata.redb").is_file());
+        drop(store);
+
+        let reopened = MetadataStore::open(dir.path()).unwrap();
+        assert_eq!(
+            reopened.resolve_name("legacy.txt").unwrap(),
+            Some(object_id)
+        );
+    }
+
+    #[test]
+    fn engine_layout_migration_blocks_old_sled_opening() {
+        let dir = tempdir().unwrap();
+        let store_path = dir.path().join("store");
+        let metadata_path = store_path.join("metadata.db");
+        std::fs::create_dir_all(&store_path).unwrap();
+        let legacy = sled::open(&metadata_path).unwrap();
+        legacy
+            .open_tree("name_index")
+            .unwrap()
+            .insert(b"legacy.txt", &[7u8; 16])
+            .unwrap();
+        legacy.flush().unwrap();
+        drop(legacy);
+
+        let store = MetadataStore::open(&metadata_path).unwrap();
+        assert!(metadata_path.join("metadata.redb").is_file());
+        assert!(metadata_path.join("conf.sled-backup").is_file());
+        assert!(sled::open(&metadata_path).is_err());
+        assert!(store.resolve_name("legacy.txt").unwrap().is_some());
+    }
+
+    #[test]
+    fn unsupported_metadata_marker_is_rejected_without_reimport() {
+        let dir = tempdir().unwrap();
+        let store = MetadataStore::open(dir.path()).unwrap();
+        store
+            .write_value(WATCHER_CONFIG, MIGRATION_MARKER, b"redb-v2")
+            .unwrap();
+        drop(store);
+
+        let error = match MetadataStore::open(dir.path()) {
+            Ok(_) => panic!("unsupported metadata marker was accepted"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("Unsupported metadata backend version"));
+    }
+
+    #[test]
+    fn missing_required_table_is_rejected_on_open() {
+        let dir = tempdir().unwrap();
+        let store = MetadataStore::open(dir.path()).unwrap();
+        drop(store);
+        let db = Database::open(dir.path().join("metadata.redb")).unwrap();
+        let write_txn = db.begin_write().unwrap();
+        write_txn.delete_table(OBJECT_INDEX).unwrap();
+        write_txn.commit().unwrap();
+        drop(db);
+
+        let error = match MetadataStore::open(dir.path()) {
+            Ok(_) => panic!("missing required table was accepted"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, OosLiteError::Redb(_)));
+    }
+
+    #[test]
+    fn empty_engine_database_is_rejected_without_reimport() {
+        let dir = tempdir().unwrap();
+        let store_path = dir.path().join("store");
+        let metadata_path = store_path.join("metadata.db");
+        let legacy_path = store_path.join("metadata.db.sled");
+        std::fs::create_dir_all(&legacy_path).unwrap();
+        let legacy = sled::open(&legacy_path).unwrap();
+        legacy
+            .open_tree("name_index")
+            .unwrap()
+            .insert(b"legacy.txt", &[9u8; 16])
+            .unwrap();
+        legacy.flush().unwrap();
+        drop(legacy);
+        std::fs::File::create(&metadata_path).unwrap();
+
+        assert!(MetadataStore::open(&metadata_path).is_err());
+        assert!(metadata_path.is_file());
+        assert_eq!(std::fs::metadata(&metadata_path).unwrap().len(), 0);
+        assert!(!store_path.join("metadata.db.corrupt").exists());
     }
 }

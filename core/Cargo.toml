@@ -9,6 +9,7 @@ blake3 = { workspace = true }
 crc32fast = { workspace = true }
 fastcdc = { workspace = true }
 sled = { workspace = true }
+redb = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 zstd = { workspace = true }

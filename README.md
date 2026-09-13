@@ -273,11 +273,29 @@ By default, OOS-Lite initializes its storage root in `.oos-store` (customizable 
 │   └── segment_00000002.seg
 ├── wal/                    # Redo Write-Ahead Log with CRC32C verification
 │   └── wal.log
-└── metadata.db/            # Embedded Sled B-Tree metadata database
-    ├── conf
-    ├── db
-    └── snap.*              # Zero-copy snapshot manifests, name index, object index
+├── metadata.db.open.lock   # Metadata initialization lock
+└── metadata.db/
+    ├── metadata.redb       # Active embedded redb database
+    ├── .redb-active        # Durable publication marker; do not remove
+    ├── .redb-migrating     # Migration intent
+    ├── conf               # Blocks older sled-based binaries
+    ├── conf.sled-backup    # Original sled settings, when migrating
+    ├── db                 # Original sled data, when migrating
+    └── snap.*             # Original sled snapshots, when present
 ```
+
+Sled metadata is imported through `metadata.redb.staging`. Original sled data stays
+in place; a disposable `.redb-sled-import/` copy is used for reading it after the
+sled blocker is installed. Migration resumes automatically if interrupted before
+publication. Once `.redb-active` exists, a missing or corrupt database causes an
+error instead of importing stale sled history. Keep the entire metadata directory
+together when backing up; do not remove state markers or bypass the sled blocker.
+
+Valid databases from earlier redb builds using a `metadata.db` file remain readable.
+Their `metadata.db.sled/` archives are never automatically reimported when the
+active file is missing or damaged. An interrupted migration from those builds may
+require manual recovery from a complete backup. Opening a migrated store with an
+older sled-based release is unsupported.
 
 ---
 
@@ -329,7 +347,7 @@ oos-lite/
 | **Content Addressing** | [`blake3`](https://crates.io/crates/blake3) | Cryptographic 256-bit chunk identification at hardware speeds |
 | **Data Integrity** | [`crc32fast`](https://crates.io/crates/crc32fast) | SIMD-accelerated physical block verification |
 | **CDC Chunking** | [`fastcdc`](https://crates.io/crates/fastcdc) | Fast Content-Defined Chunking with dynamic cut points |
-| **Metadata Engine** | [`sled`](https://crates.io/crates/sled) | Embedded lock-free B-Tree database for names and manifests |
+| **Metadata Engine** | [`redb`](https://crates.io/crates/redb) | Embedded ACID key-value database for names, manifests, snapshots, and watcher state |
 | **CLI Framework** | [`clap`](https://crates.io/crates/clap) | Declarative CLI argument parsing |
 | **Embedded Web** | [`tiny_http`](https://crates.io/crates/tiny_http) | Lightweight, non-async embedded HTTP server |
 | **Diagnostics** | [`tracing`](https://crates.io/crates/tracing) | High-performance structured logging |

@@ -67,10 +67,9 @@ impl FsckRunner {
                 for cid in &manifest.chunks {
                     if !segment_store.has_chunk(cid) {
                         report.missing_chunks += 1;
-                        report.errors.push(format!(
-                            "Manifest {} references missing chunk {}",
-                            mid, cid
-                        ));
+                        report
+                            .errors
+                            .push(format!("Manifest {} references missing chunk {}", mid, cid));
                     } else {
                         // Attempt to read chunk through reader to verify full end-to-end extraction
                         match segment_store.get_chunk(cid) {
@@ -95,13 +94,15 @@ impl FsckRunner {
                     }
                 }
             } else {
-                report.errors.push(format!("Manifest {} listed in index could not be retrieved", mid));
+                report.errors.push(format!(
+                    "Manifest {} listed in index could not be retrieved",
+                    mid
+                ));
             }
         }
 
         // 3. Include unbound objects whose historical versions remain recoverable.
-        for record in metadata_store.all_objects() {
-            let record = record?;
+        metadata_store.visit_objects(|record| {
             report.objects_checked += 1;
             for v in &record.versions {
                 if metadata_store.get_manifest(&v.manifest_id)?.is_none() {
@@ -111,7 +112,8 @@ impl FsckRunner {
                     ));
                 }
             }
-        }
+            Ok(())
+        })?;
 
         // 4. Scan Snapshots
         let snapshots = metadata_store.list_snapshots()?;
@@ -126,9 +128,8 @@ impl FsckRunner {
             }
         }
 
-        report.is_healthy = report.corrupted_chunks == 0
-            && report.missing_chunks == 0
-            && report.errors.is_empty();
+        report.is_healthy =
+            report.corrupted_chunks == 0 && report.missing_chunks == 0 && report.errors.is_empty();
 
         info!(
             healthy = report.is_healthy,

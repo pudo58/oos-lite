@@ -305,6 +305,14 @@ impl StorageEngine {
 
         // Check metadata.db directory
         let meta_dir = root.join("metadata.db");
+        // Earlier redb builds used a file here. Migration archives/state also
+        // count as existing data, even if the active database is missing.
+        if meta_dir.is_file()
+            || root.join("metadata.db.sled").exists()
+            || root.join("metadata.db.redb-active").exists()
+        {
+            return Ok(false);
+        }
         if meta_dir.exists() {
             if let Ok(entries) = fs::read_dir(&meta_dir) {
                 let count = entries.flatten().count();
