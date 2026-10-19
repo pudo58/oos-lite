@@ -105,7 +105,7 @@
         <div class="file-metric"><div><i data-lucide="layers"></i><span data-i18n="tab_snapshots">Snapshots</span></div><strong id="metric-versions">0</strong></div>
       </div>
       <div class="files-toolbar">
-        <div class="file-search"><i data-lucide="search"></i><input id="file-search-input" type="search" oninput="filterFilesTable()" placeholder="Search files and folders..." data-i18n-placeholder="files_search_placeholder" aria-label="Search files"></div>
+        <div class="file-search"><i data-lucide="search"></i><input id="file-search-input" type="search" oninput="filterFilesTable()" onsearch="filterFilesTable()" placeholder="Search files and folders..." data-i18n-placeholder="files_search_placeholder" aria-label="Search files"></div>
         <div class="toolbar-right"><select id="file-sort" onchange="filterFilesTable()" data-i18n-title="filter_label"><option value="name" data-i18n="sort_name">Name: A to Z</option><option value="recent" data-i18n="sort_recent">Recently updated</option><option value="size" data-i18n="sort_size">Largest files</option></select>
           <div class="view-segments" role="group" aria-label="File view"><button id="btn-view-list" onclick="setViewMode('list')" title="List" aria-label="List"><i data-lucide="list"></i></button><button id="btn-view-tree" onclick="setViewMode('tree')" title="Tree" aria-label="Tree"><i data-lucide="folder-tree"></i></button><button id="btn-view-grid" onclick="setViewMode('grid')" title="Grid" aria-label="Grid"><i data-lucide="layout-grid"></i></button></div>
         </div>
@@ -1248,7 +1248,7 @@
       currentLang = lang;
       localStorage.setItem('oos_lang', lang);
       applyTranslations();
-      renderFiles(cachedFilesList);
+      filterFilesTable();
       loadSnapshots();
       if (cachedMountStatus) updateMountUi(cachedMountStatus);
       if (cachedWatcherStatus) updateWatcherUi(cachedWatcherStatus);
@@ -1402,7 +1402,7 @@
       if (listContainer) listContainer.classList.toggle('hidden', mode !== 'list');
       if (gridContainer) gridContainer.classList.toggle('hidden', mode !== 'grid');
 
-      renderFiles(cachedFilesList);
+      filterFilesTable();
     }
 
     function toggleTreeFolder(folderPath) {
@@ -1509,17 +1509,29 @@
     async function loadFiles() {
       try {
         const res = await fetch('/api/files');
-        cachedFilesList = await res.json();
-        renderFiles(cachedFilesList);
+        const data = await res.json();
+        cachedFilesList = Array.isArray(data) ? data : [];
+        filterFilesTable();
       } catch (err) {
         console.error('Error loading files:', err);
       }
     }
 
+    function searchQuery() {
+      const input = document.getElementById('file-search-input');
+      if (!input) return '';
+      return input.value.normalize('NFC').replace(/\\/g, '/').toLowerCase().trim();
+    }
+
+    function fileMatchesQuery(file, q) {
+      const name = String(file.name || '').normalize('NFC').replace(/\\/g, '/').toLowerCase();
+      return name.includes(q);
+    }
+
     function filterFilesTable() {
-      const q = document.getElementById('file-search-input').value.toLowerCase().trim();
-      const filtered = q ? cachedFilesList.filter(f => f.name.toLowerCase().includes(q)) : cachedFilesList;
-      renderFiles(filtered);
+      const q = searchQuery();
+      const list = Array.isArray(cachedFilesList) ? cachedFilesList : [];
+      renderFiles(q ? list.filter(f => fileMatchesQuery(f, q)) : list);
     }
 
     function getFileIcon(name) {
@@ -1553,16 +1565,12 @@
     function renderFilesTree(files) {
       const container = document.getElementById('files-tree-body');
       if (!container) return;
-      if (!files || files.length === 0) {
-        container.innerHTML = `<div class="py-12 text-center text-slate-400 font-mono">${t('files_empty')}</div>`;
-        return;
-      }
-
-      const q = document.getElementById('file-search-input').value.toLowerCase().trim();
-      const filtered = q ? files.filter(f => f.name.toLowerCase().includes(q)) : files;
+      const q = searchQuery();
+      const list = Array.isArray(files) ? files : [];
+      const filtered = q ? list.filter(f => fileMatchesQuery(f, q)) : list;
 
       if (filtered.length === 0) {
-        container.innerHTML = `<div class="py-12 text-center text-slate-400 font-mono">${t('search_empty')}</div>`;
+        container.innerHTML = `<div class="py-12 text-center text-slate-400 font-mono">${t(q ? 'search_empty' : 'files_empty')}</div>`;
         return;
       }
 

@@ -110,8 +110,8 @@ body.desktop-ui :is(button,a)[class*="bg-rose-6"] { background: #b9444b !importa
 .file-metric:nth-child(3) strong { color: var(--accent); }
 .files-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 17px; }
 .file-search { position: relative; flex: 1; max-width: 330px; }
-.file-search input { width: 100%; padding: 8px 12px 8px 33px; font-size: 11px; }
-.file-search > svg { position: absolute; left: 10px; top: 10px; width: 15px; height: 15px; color: #909b95; }
+.file-search input { width: 100%; padding: 8px 28px 8px 33px; font-size: 11px; }
+.file-search > svg { position: absolute; left: 10px; top: 10px; width: 15px; height: 15px; color: #909b95; pointer-events: none; }
 .toolbar-right { display: flex; align-items: center; gap: 12px; }
 .toolbar-right select { font-size: 11px; padding: 6px 8px; max-width: 160px; }
 .view-segments { display: inline-flex; border: 1px solid var(--line); border-radius: 5px; padding: 3px; gap: 2px; background: #f8faf9; }
